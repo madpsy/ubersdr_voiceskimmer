@@ -179,13 +179,12 @@
     );
     if (rows.length === 0) {
       els.confirmedBody.innerHTML =
-        '<tr class="empty-row"><td colspan="9">no callsigns confirmed yet</td></tr>';
+        '<tr class="empty-row"><td colspan="10">no callsigns confirmed yet</td></tr>';
       return;
     }
     els.confirmedBody.innerHTML = rows
       .map((d) => {
         const star = d.agrees_with_dx_spot ? '<span class="star">★</span> ' : "";
-        const who = d.name || d.country || "";
         let spotted = '<span class="badge no">no</span>';
         if (d.spotted_at) {
           spotted = '<span class="badge spotted">spotted</span>';
@@ -194,7 +193,8 @@
           `<tr><td class="call">${star}${esc(d.normalised)}</td>` +
           `<td>${esc(d.band)}</td><td>${fmtFreq(d.frequency)}</td>` +
           `<td>${esc((d.mode || "").toUpperCase())}</td>` +
-          `<td class="name">${esc(who)}</td>` +
+          `<td class="name">${esc(d.name || "")}</td>` +
+          `<td class="name">${esc(d.country || "")}</td>` +
           `<td>${fmtTime(d.first_seen)}</td><td>${fmtTime(d.timestamp)}</td>` +
           `<td>${d.hit_count ?? 1}</td><td>${spotted}</td></tr>`
         );

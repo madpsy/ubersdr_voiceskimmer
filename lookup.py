@@ -275,7 +275,17 @@ class CallsignValidator:
             callsign=callsign,
             valid=True,
             checked=True,
-            name=pick("name", "fname", "callsign_name"),
+            # QRZ splits the operator's name: "fname" is the given name(s),
+            # "name" is the SURNAME (qrz_lookup.go QRZCallsign). Picking
+            # "name" first therefore yields the surname — M7SPE came out as
+            # "Campbell" rather than "Paul Elliott". A spot comment wants
+            # what you'd call the operator on air, so prefer the nickname
+            # they chose, then the given name, and only fall back to the
+            # formatted/full name when neither is on file.
+            name=(
+                pick("nickname", "fname")
+                or pick("name_fmt", "name", "callsign_name")
+            ),
             country=pick("country") or cty.get("country", ""),
             continent=cty.get("continent", ""),
             grid=pick("grid", "locator"),
