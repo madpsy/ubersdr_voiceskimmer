@@ -66,10 +66,20 @@
     vertical-align: middle;
     margin: 0 4px;
   }
-  #signal .bar i { display: block; height: 100%; background: var(--dim); }
-  /* Peak cleared the threshold — the scanner will stay on this frequency. */
+  #signal .bar i {
+    display: block; height: 100%;
+    background: var(--dim);
+    transition: width .15s linear, background-color .15s linear;
+  }
+  /* Live reading below the threshold — nothing worth stopping for yet. */
+  #signal.low .val, #signal.low .peak { color: var(--warn); }
+  #signal.low .bar i { background: var(--warn); }
+  /* At or above it — a real signal is present right now. */
   #signal.active .val { color: var(--good); }
   #signal.active .bar i { background: var(--good); }
+  /* The peak is what the dwell decision is made on, so it stays green once
+     cleared even while the instantaneous value dips between overs. */
+  #signal .peak.cleared { color: var(--good); }
 
   #listen {
     background: #21262d;

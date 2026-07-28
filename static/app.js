@@ -91,11 +91,19 @@
     const lo = thr - 10, hi = thr + 10;
     const pct = Math.max(0, Math.min(100, ((sig.snr - lo) / (hi - lo)) * 100));
     const peak = typeof sig.peak === "number" ? sig.peak : sig.snr;
-    els.signal.classList.toggle("active", peak >= thr);
+
+    // Colour the live reading by the instantaneous value: orange while it is
+    // below the threshold, green once it reaches it. The peak is tracked
+    // separately because that is what the dwell decision uses — it stays
+    // green once cleared even as the live value dips between overs.
+    const live = sig.snr >= thr;
+    els.signal.classList.toggle("active", live);
+    els.signal.classList.toggle("low", !live);
     els.signal.innerHTML =
       `SNR <span class="val">${sig.snr.toFixed(1)}</span>` +
       `<span class="bar"><i style="width:${pct.toFixed(0)}%"></i></span>` +
-      `peak ${peak.toFixed(1)} / ${thr.toFixed(0)} dB`;
+      `peak <span class="peak${peak >= thr ? " cleared" : ""}">` +
+      `${peak.toFixed(1)}</span> / ${thr.toFixed(0)} dB`;
   }
 
   // -- Stats bar --------------------------------------------------------------
