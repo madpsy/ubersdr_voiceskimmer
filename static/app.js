@@ -22,6 +22,7 @@
     targetsBody: document.querySelector("#targets-table tbody"),
     listen: document.getElementById("listen"),
     audio: document.getElementById("audio-el"),
+    signal: document.getElementById("signal"),
   };
 
   // Client-side copies, keyed the same way the server keeps them, so each
@@ -73,6 +74,28 @@
       `${esc(current.band)} &nbsp; <span class="freq">${fmtFreq(current.dial_freq)}</span> ` +
       `${esc((current.mode || "").toUpperCase())} &nbsp; ` +
       `SNR ${(current.snr ?? 0).toFixed(1)} dB &nbsp; conf ${(current.confidence ?? 0).toFixed(2)}${dx}`;
+  }
+
+  // -- Live signal ----------------------------------------------------------
+
+  // Measured from the audio frame headers rather than inferred from the
+  // transcript, so it reads correctly even on a frequency Whisper produces
+  // nothing for. The bar is scaled around the threshold rather than 0-100:
+  // the interesting range is a few dB either side of it.
+  function renderSignal(sig) {
+    if (!sig || typeof sig.snr !== "number") {
+      els.signal.innerHTML = "";
+      return;
+    }
+    const thr = sig.threshold ?? 40;
+    const lo = thr - 10, hi = thr + 10;
+    const pct = Math.max(0, Math.min(100, ((sig.snr - lo) / (hi - lo)) * 100));
+    const peak = typeof sig.peak === "number" ? sig.peak : sig.snr;
+    els.signal.classList.toggle("active", peak >= thr);
+    els.signal.innerHTML =
+      `SNR <span class="val">${sig.snr.toFixed(1)}</span>` +
+      `<span class="bar"><i style="width:${pct.toFixed(0)}%"></i></span>` +
+      `peak ${peak.toFixed(1)} / ${thr.toFixed(0)} dB`;
   }
 
   // -- Stats bar --------------------------------------------------------------
@@ -296,6 +319,7 @@
     // the live insertBefore behaviour of renderSpotRow.
     [...(state.spots || [])].reverse().forEach(renderSpotRow);
     renderTargets(state.targets);
+    renderSignal(state.signal);
     renderAudioAvailable(!!state.audio_available);
   }
 
@@ -320,6 +344,7 @@
     es.addEventListener("spot", (e) => renderSpotRow(JSON.parse(e.data)));
     es.addEventListener("stats", (e) => renderStats(JSON.parse(e.data)));
     es.addEventListener("targets", (e) => renderTargets(JSON.parse(e.data)));
+    es.addEventListener("signal", (e) => renderSignal(JSON.parse(e.data)));
     es.onerror = () => {
       // The browser's EventSource auto-reconnects; nothing to do here beyond
       // letting the connection indicator (uptime keeps ticking) imply it.

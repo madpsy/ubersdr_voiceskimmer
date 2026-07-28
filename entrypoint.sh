@@ -12,6 +12,10 @@
 #   MAX_DWELL             Hard ceiling per frequency             (default: 180)
 #   MIN_SNR               Ignore activity below this SNR         (default: 8)
 #   MIN_CONFIDENCE        Ignore activity below this confidence   (default: 0.7)
+#   SILENCE_MIN_SNR       Peak SNR (dB) within SILENCE_TIMEOUT for a frequency
+#                         to count as active (default: 40). Measured from the
+#                         audio frame headers, independent of transcription.
+#   SILENCE_TIMEOUT       Seconds to wait for that peak before moving on (default: 10)
 #   LOCK_FREQ             Stick to one frequency (Hz) instead of hopping
 #   LOCK_MODE             Mode for LOCK_FREQ                     (default: usb)
 #   PROMPT                Custom Whisper initial prompt
@@ -44,6 +48,8 @@ args=""
 [ -n "$MAX_DWELL"            ] && args="$args --max-dwell $MAX_DWELL"
 [ -n "$MIN_SNR"              ] && args="$args --min-snr $MIN_SNR"
 [ -n "$MIN_CONFIDENCE"       ] && args="$args --min-confidence $MIN_CONFIDENCE"
+[ -n "$SILENCE_MIN_SNR"      ] && args="$args --silence-min-snr $SILENCE_MIN_SNR"
+[ -n "$SILENCE_TIMEOUT"      ] && args="$args --silence-timeout $SILENCE_TIMEOUT"
 [ -n "$LOCK_FREQ"            ] && args="$args --lock-freq $LOCK_FREQ"
 [ -n "$LOCK_MODE"            ] && args="$args --lock-mode $LOCK_MODE"
 

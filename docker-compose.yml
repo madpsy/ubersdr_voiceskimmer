@@ -22,6 +22,17 @@ services:
       # MIN_SNR: "8"
       # MIN_CONFIDENCE: "0.7"
       #
+      # How a frequency is judged quiet. SNR is measured directly from the
+      # audio frame headers, so it does not depend on Whisper transcribing
+      # anything. Any single peak above SILENCE_MIN_SNR within
+      # SILENCE_TIMEOUT keeps the dwell alive; otherwise the scanner moves on.
+      #
+      # This is power vs noise DENSITY, not per-channel SNR — subtract about
+      # 34.8 dB for a 3 kHz SSB channel. Measured live: a quiet frequency
+      # sits around 33-34 dB and peaks below 38, an active one peaks past 40.
+      # SILENCE_MIN_SNR: "40"
+      # SILENCE_TIMEOUT: "10"
+      #
       # Stick to one exact frequency instead of hopping (for testing)
       # LOCK_FREQ: "7200000"
       # LOCK_MODE: "lsb"

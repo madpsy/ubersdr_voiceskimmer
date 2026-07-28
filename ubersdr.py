@@ -29,9 +29,26 @@ from typing import Callable, List, Optional
 import requests
 import websocket
 
+try:
+    import zstandard
+except ImportError:                       # signal metrics degrade, scan does not
+    zstandard = None
+
 from useragent import USER_AGENT
 
 log = logging.getLogger(__name__)
+
+# Audio frames are a zstd-compressed PCM binary packet (pcm_binary.go). Only
+# the "full" header carries signal quality; the minimal one is timestamp-only.
+PCM_MAGIC_FULL = 0x5043        # "PC"
+PCM_MAGIC_MINIMAL = 0x504D     # "PM"
+# Offsets within the decompressed full header (version 2):
+#   0:2 magic | 2 version | 3 format | 4:12 gps ns | 12:20 wall clock
+#   20:24 sample rate | 24 channels | 25:29 baseband power | 29:33 noise density
+PCM_V2_SIGNAL_OFFSET = 25
+PCM_V2_MIN_LEN = 33
+# The server writes -999.0 when radiod has no channel status to report.
+PCM_NO_SIGNAL_DATA = -998.0
 
 # Binary message types from the whisper extension (audio_extensions/whisper/decoder.go)
 MSG_SEGMENTS = 0x02
@@ -64,6 +81,7 @@ class UberSDRSession:
         mode: str = "usb",
         on_segment: Optional[Callable[[Segment], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
+        on_signal: Optional[Callable[[float, float], None]] = None,
     ):
         self.host = host
         self.port = port
@@ -76,6 +94,9 @@ class UberSDRSession:
 
         self.on_segment = on_segment
         self.on_error = on_error
+        self.on_signal = on_signal
+        self._zstd = zstandard.ZstdDecompressor() if zstandard else None
+        self._signal_warned = False
 
         self._ws_scheme = "wss" if use_ssl else "ws"
         self._audio_ws: Optional[websocket.WebSocketApp] = None
@@ -261,9 +282,11 @@ class UberSDRSession:
         self._send_audio({"type": "set_mute", "muted": True})
 
     def _on_audio_message(self, ws, message) -> None:
-        # Binary frames are audio/silence packets; drain and discard. Text
-        # frames are status. We only care about errors and kicks.
+        # Binary frames are audio/silence packets. We never decode the audio
+        # itself, but their header carries live signal quality — see
+        # _handle_audio_frame.
         if isinstance(message, bytes):
+            self._handle_audio_frame(message)
             return
         try:
             msg = json.loads(message)
@@ -290,6 +313,42 @@ class UberSDRSession:
             self._running = False
             if self.on_error:
                 self.on_error("session kicked")
+
+    def _handle_audio_frame(self, frame: bytes) -> None:
+        """
+        Pull baseband power and noise density out of an audio frame's header.
+
+        The audio payload is never decoded — only the header is read. Both
+        figures are present on every frame of a non-IQ mode (the server forces
+        a full header for exactly this reason) and, importantly, they remain
+        REAL while the session is muted: muting zeroes the PCM payload but not
+        the measured header metrics. So this gives a true ~50 Hz signal
+        reading without ever unmuting.
+
+        SNR here is baseband power minus noise DENSITY, matching the server's
+        own definition (min_snr in websocket.go). It is not a per-channel SNR
+        — subtract 10*log10(bandwidth), about 34.8 dB for a 3 kHz SSB channel,
+        to get that. Measured live, a quiet frequency sits around 33-34 and a
+        signal peaks past 40.
+        """
+        if self._zstd is None or self.on_signal is None:
+            return
+        try:
+            raw = self._zstd.decompress(frame, max_output_size=1 << 20)
+        except Exception:
+            return
+
+        if len(raw) < PCM_V2_MIN_LEN:
+            return
+        magic, version = struct.unpack_from("<HB", raw, 0)
+        # Minimal-header frames carry no signal fields; version 1 has none either.
+        if magic != PCM_MAGIC_FULL or version < 2:
+            return
+
+        baseband, noise = struct.unpack_from("<ff", raw, PCM_V2_SIGNAL_OFFSET)
+        if baseband <= PCM_NO_SIGNAL_DATA or noise <= PCM_NO_SIGNAL_DATA:
+            return                      # radiod had no channel status to report
+        self.on_signal(baseband, noise)
 
     def _on_audio_close(self, ws, code, msg) -> None:
         log.info("Audio WS closed (%s)", code)

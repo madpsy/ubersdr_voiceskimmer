@@ -176,6 +176,7 @@ class WebUI:
         self._spots: "deque[Dict[str, Any]]" = deque(maxlen=spots_maxlen)
         self._targets: List[Dict[str, Any]] = []
         self._stats: Dict[str, Any] = {}
+        self._signal: Optional[Dict[str, Any]] = None
 
         self._subscribers: List["queue.Queue[str]"] = []
         self._subscribers_lock = threading.Lock()
@@ -342,6 +343,19 @@ class WebUI:
                 self._confirmed[callsign]["spotted_at"] = entry["time"]
         self._broadcast("spot", entry)
 
+    def update_signal(self, snr: float, peak: Optional[float], threshold: float) -> None:
+        """
+        Live signal reading for the frequency currently tuned.
+
+        Called from the scanner's own rate limiter, not per audio frame —
+        frames arrive at ~50 Hz, which would swamp the SSE stream and every
+        connected browser for no visible benefit.
+        """
+        entry = {"snr": snr, "peak": peak, "threshold": threshold, "time": time.time()}
+        with self._lock:
+            self._signal = entry
+        self._broadcast("signal", entry)
+
     def update_stats(self, stats: Dict[str, Any], targets: List[Dict[str, Any]]) -> None:
         """`targets` is [dataclasses.asdict(t) for t in tracker.snapshot()]."""
         with self._lock:
@@ -370,6 +384,7 @@ class WebUI:
                 "spots": list(self._spots),
                 "targets": self._targets,
                 "stats": self._stats_payload_locked(),
+                "signal": self._signal,
                 "audio_available": self.audio.available,
             }
 

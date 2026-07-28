@@ -162,6 +162,15 @@ class CallsignScanner:
         # re-sent repeatedly as Whisper's transcription of it grows.
         self._silence_lock = threading.Lock()
         self._heard_words = 0
+        # Peak SNR seen since this dwell started, from the audio frame headers
+        # (see UberSDRSession._handle_audio_frame). A direct measurement of
+        # whether anything is actually on the frequency, rather than inferring
+        # it from what Whisper produced. None until the first frame arrives —
+        # if it stays None the server gave us no signal data and the
+        # word-count check below is used instead.
+        self._peak_snr: Optional[float] = None
+        self._last_snr: Optional[float] = None
+        self._last_web_signal = 0.0
 
         self.stats = {
             "dwells": 0,
@@ -220,6 +229,7 @@ class CallsignScanner:
             mode=mode,
             on_segment=self.segments.put,
             on_error=self._on_session_error,
+            on_signal=self._on_signal,
         )
 
         if not self.session.start():
@@ -300,6 +310,24 @@ class CallsignScanner:
                 self.spotter = None
 
         return True
+
+    # Frames arrive at ~50 Hz; the dashboard is pushed at most this often.
+    _WEB_SIGNAL_INTERVAL = 0.25
+
+    def _on_signal(self, baseband: float, noise: float) -> None:
+        """Called ~50x/sec from the audio socket thread for every frame."""
+        snr = baseband - noise
+        with self._silence_lock:
+            self._last_snr = snr
+            if self._peak_snr is None or snr > self._peak_snr:
+                self._peak_snr = snr
+            peak = self._peak_snr
+            due = (time.time() - self._last_web_signal) >= self._WEB_SIGNAL_INTERVAL
+            if due:
+                self._last_web_signal = time.time()
+
+        if due and self.web:
+            self.web.update_signal(snr, peak, self.args.silence_min_snr)
 
     def _on_session_error(self, message: str) -> None:
         if "kicked" in message.lower() or "audio session" in message.lower():
@@ -421,6 +449,7 @@ class CallsignScanner:
         started = time.time()
         with self._silence_lock:
             self._heard_words = 0
+            self._peak_snr = None      # measured fresh for this dwell
 
         deadline = started + self.args.dwell
         # Each unvalidated candidate pushes the deadline out, so without a
@@ -442,13 +471,22 @@ class CallsignScanner:
                 exit_reason = "confirmed"
                 break
 
-            if not locked:
+            if not locked and time.time() >= silence_deadline:
                 with self._silence_lock:
                     heard_words = self._heard_words
-                if (
-                    heard_words < self.args.silence_min_words
-                    and time.time() >= silence_deadline
-                ):
+                    peak_snr = self._peak_snr
+                # Prefer the direct measurement: a peak above the threshold
+                # anywhere in the window means something was genuinely on the
+                # frequency, so stay. Only fall back to counting Whisper's
+                # words when the server sends no signal data (version 1, or
+                # radiod had no channel status), since that count is a proxy
+                # for the same question and a poor one — Whisper hallucinates
+                # stock phrases on dead air.
+                if peak_snr is not None:
+                    quiet = peak_snr < self.args.silence_min_snr
+                else:
+                    quiet = heard_words < self.args.silence_min_words
+                if quiet:
                     exit_reason = "silence"
                     break
 
@@ -466,11 +504,19 @@ class CallsignScanner:
         elif exit_reason == "silence":
             with self._silence_lock:
                 words = self._heard_words
-            log.info(
-                "   (only %d word(s) in %.0fs — likely QSY'd, inaudible, or "
-                "hallucinated stock phrases, moving on)",
-                words, held,
-            )
+                peak_snr = self._peak_snr
+            if peak_snr is not None:
+                log.info(
+                    "   (peak SNR %.1f dB < %.1f in %.0fs — nothing on this "
+                    "frequency, moving on)",
+                    peak_snr, self.args.silence_min_snr, held,
+                )
+            else:
+                log.info(
+                    "   (only %d word(s) in %.0fs — likely QSY'd, inaudible, or "
+                    "hallucinated stock phrases, moving on)",
+                    words, held,
+                )
         elif held > self.args.dwell + 1:
             log.info("   (held %.0fs)", held)
 
@@ -923,6 +969,20 @@ def parse_args(argv=None):
                            "air, etc.). Once enough is heard this no longer "
                            "applies for the rest of the dwell. The frequency "
                            "stays in rotation and is retried on the next sweep.")
+    scan.add_argument("--silence-min-snr", type=float, default=40.0,
+                      help="Peak SNR (dB) that must be seen within "
+                           "--silence-timeout for a frequency to count as "
+                           "active. Measured directly from the audio frame "
+                           "headers, so it does not depend on Whisper "
+                           "producing anything. Any single peak above this "
+                           "keeps the dwell alive. This is power vs noise "
+                           "DENSITY (the server's own min_snr definition), not "
+                           "per-channel SNR — subtract ~34.8 dB for a 3 kHz "
+                           "SSB channel. Measured live: a quiet frequency "
+                           "sits around 33-34 dB and peaks below 38; an "
+                           "active one peaks past 40. Used in preference to "
+                           "--silence-min-words whenever the server reports "
+                           "signal data.")
     scan.add_argument("--silence-min-words", type=int, default=4,
                       help="Words (from completed segments) required within "
                            "--silence-timeout to count as real activity. "
