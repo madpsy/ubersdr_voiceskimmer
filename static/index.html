@@ -106,14 +106,31 @@
     overflow-y: auto;
     max-height: 42vh;
   }
-  #transcript-panel .scroll { max-height: 60vh; }
-
+  /* Show a fixed number of transcript lines, then scroll. Height is derived
+     from the line metrics rather than a vh fraction, so the visible count is
+     the same on any screen instead of drifting with the window. A wrapped
+     entry naturally occupies more than one of these lines. */
+  /* Declared on the panel so both the scrolling container and the transcript
+     inherit them — custom properties inherit downwards only. */
+  #transcript-panel {
+    --line-size: 12.5px;
+    --line-height: 1.5;
+    --visible-lines: 15;
+    --pad-y: 8px;
+  }
   #transcript {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 12.5px;
-    padding: 8px 12px;
+    font-size: var(--line-size);
+    line-height: var(--line-height);
+    padding: var(--pad-y) 12px;
   }
-  #transcript div { padding: 1px 0; white-space: pre-wrap; word-break: break-word; }
+  #transcript-panel .scroll {
+    max-height: calc(
+      var(--visible-lines) * var(--line-size) * var(--line-height)
+      + 2 * var(--pad-y)
+    );
+  }
+  #transcript div { white-space: pre-wrap; word-break: break-word; }
   #transcript .partial { color: var(--dim); }
   #transcript .final { color: var(--text); }
   #transcript .final .marker { color: var(--good); }
