@@ -1,0 +1,66 @@
+services:
+  ubersdr_voiceskimmer:
+    image: madpsy/ubersdr_voiceskimmer:latest
+    container_name: voiceskimmer
+    restart: unless-stopped
+    cpu_shares: 512
+    environment:
+      # UberSDR connection
+      UBERSDR_HOST: "ubersdr"
+      UBERSDR_PORT: "8080"
+      # UBERSDR_SSL: "1"
+      # UBERSDR_PASS: ""
+      #
+      # Restrict to one or more bands, comma-separated (default: all bands)
+      # BAND: "20m,40m"
+      #
+      # Dwell tuning (seconds)
+      # DWELL: "45"
+      # MAX_DWELL: "180"
+      #
+      # Ignore weak/uncertain voice activity
+      # MIN_SNR: "8"
+      # MIN_CONFIDENCE: "0.7"
+      #
+      # Stick to one exact frequency instead of hopping (for testing)
+      # LOCK_FREQ: "7200000"
+      # LOCK_MODE: "lsb"
+      #
+      # Whisper recognition tuning
+      # PROMPT: ""
+      # ASR_LANGUAGE: "en"
+      # STOCK_WHISPER: "1"   # required if the server lacks whisper.allow_client_params
+      #
+      # DX cluster spot submission — off by default. Spots are immediately
+      # visible to every connected DX cluster client.
+      # SPOT: "1"
+      # SPOTTER_CALL: ""
+      # SPOTTER_PASS: ""
+      # SPOT_TAG: "[Voice]"
+      # SPOT_COOLDOWN: "900"
+      # SPOT_FREQ_TOLERANCE: "100"
+      # SPOT_MIN_LENGTH: "4"
+      #
+      # Dashboard port (0 disables it)
+      # WEB_PORT: "6098"
+      #
+      # JSONL detection log path inside the container (persisted via the
+      # /data bind mount below)
+      # OUTPUT: "/data/detections.jsonl"
+      #
+      # VERBOSE: "1"
+    networks:
+      - sdr-network
+    volumes:
+      - ./voiceskimmer_data:/data
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: "127.0.0.1:24224"
+        fluentd-async: "true"
+        tag: "voiceskimmer"
+
+networks:
+  sdr-network:
+    external: true
+    name: ubersdr_sdr-network

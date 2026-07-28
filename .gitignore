@@ -5,3 +5,5 @@ detections.jsonl
 live-test.jsonl
 *.jsonl
 *.log
+voiceskimmer_data/
+*.tmp

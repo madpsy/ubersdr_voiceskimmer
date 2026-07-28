@@ -40,6 +40,7 @@ from phonetics import (
 from dxcluster import DXClusterSpotter, SpotThrottle
 from timeline import FrequencyTimeline
 from ubersdr import Segment, UberSDRSession
+from web import WebUI
 
 log = logging.getLogger("scanner")
 
@@ -90,8 +91,9 @@ class Detection:
 
 
 class CallsignScanner:
-    def __init__(self, args):
+    def __init__(self, args, web: Optional[WebUI] = None):
         self.args = args
+        self.web = web
         self.base_url = (
             f"{'https' if args.ssl else 'http'}://{args.host}:{args.port}"
         )
@@ -139,6 +141,7 @@ class CallsignScanner:
         self._log_file = None
         self._last_key: Optional[tuple] = None
         self._worker: Optional[threading.Thread] = None
+        self._web_stats_thread: Optional[threading.Thread] = None
         self._extend_lock = threading.Lock()
         self._extend_until = 0.0
         # Set by _segment_worker the instant a VALIDATED callsign is heard on
@@ -260,6 +263,18 @@ class CallsignScanner:
         self._worker = threading.Thread(target=self._segment_worker, daemon=True)
         self._worker.start()
 
+        if self.web:
+            # Stats and the band/freq activity table need to stay live
+            # regardless of dwell length — --progress-interval (5 min
+            # default) is far too coarse for a dashboard, and a single dwell
+            # can run for --max-dwell (180s) before the main loop ticks
+            # again. A small dedicated thread keeps them fresh on their own
+            # short cadence instead.
+            self._web_stats_thread = threading.Thread(
+                target=self._web_stats_loop, daemon=True
+            )
+            self._web_stats_thread.start()
+
         if self.args.spot:
             self.spotter = DXClusterSpotter(
                 base_url=self.base_url,
@@ -329,6 +344,17 @@ class CallsignScanner:
             self.stats["validated"], self.stats["rejected"], self.stats["segments"],
         )
 
+    def _web_stats_loop(self) -> None:
+        """Push stats + the band/freq activity table to the dashboard every
+        few seconds for the lifetime of the run — see the note in start()."""
+        while self._running:
+            if self.web:
+                self.web.update_stats(
+                    self.stats, [asdict(t) for t in self.tracker.snapshot()]
+                )
+            if not self._sleep(2.0):
+                break
+
     def _dwell(self, target: Target) -> None:
         """
         Point at a target and stay there.
@@ -364,6 +390,9 @@ class CallsignScanner:
             if not self.session.tune(target.dial_freq, target.mode):
                 log.warning("Tune failed; skipping")
                 return
+
+            if self.web:
+                self.web.set_current(asdict(target))
 
             # Record the hop before resetting, so in-flight audio from the
             # previous frequency is still attributed to it.
@@ -456,9 +485,19 @@ class CallsignScanner:
                 continue
 
             self.stats["segments"] += 1
+            marker = "✓" if segment.completed else "…"
             if self.args.verbose:
-                marker = "✓" if segment.completed else "…"
                 log.info("   %s %s", marker, segment.text)
+            if self.web:
+                # Best-effort band/freq context: attribution (below) only
+                # runs for completed segments, but the dashboard wants
+                # partial ("…") lines too, so tag with wherever we're
+                # currently sitting rather than waiting for attribution.
+                live = self.timeline.current()
+                self.web.push_transcript(
+                    live.band if live else "", live.dial_freq if live else 0,
+                    marker, segment.text,
+                )
 
             # Incomplete segments are re-sent repeatedly as Whisper's
             # transcription of the same utterance grows, and would inflate
@@ -649,6 +688,9 @@ class CallsignScanner:
         )
         log.info("      heard: %r", detection.raw_text[:140])
 
+        if self.web:
+            self.web.push_confirmed(asdict(detection), is_repeat)
+
     def _maybe_spot(self, detection: Detection) -> None:
         """
         Submit a DX spot for a confirmed callsign, if --spot is enabled and
@@ -694,6 +736,8 @@ class CallsignScanner:
         comment = f"{self.args.spot_tag} {who}".strip()
         if self.spotter.submit(detection.frequency, detection.normalised, comment):
             self.spot_throttle.record(detection.normalised, detection.frequency)
+            if self.web:
+                self.web.push_spot(detection.normalised, detection.frequency, comment)
 
     def _build_detection(
         self, segment: Segment, target: Target,
@@ -766,6 +810,8 @@ class CallsignScanner:
 
         if self._worker is not None:
             self._worker.join(timeout=3.0)
+        if self._web_stats_thread is not None:
+            self._web_stats_thread.join(timeout=3.0)
 
         if self.session is not None:
             try:
@@ -970,6 +1016,14 @@ def parse_args(argv=None):
                          "candidates are still shown/logged, just not "
                          "pushed to the public cluster.")
 
+    web = parser.add_argument_group("web ui")
+    web.add_argument("--web-port", type=int, default=6098,
+                     help="Port for the live dashboard (transcript, confirmed "
+                          "callsigns, band/freq activity, DX spots). 0 disables "
+                          "it entirely.")
+    web.add_argument("--web-host", default="0.0.0.0",
+                     help="Bind address for the dashboard")
+
     parser.add_argument("--check", action="store_true",
                         help="Run pre-flight checks against the instance and "
                              "exit without scanning")
@@ -1020,7 +1074,12 @@ def main(argv=None) -> int:
         print("Not usable — fix the FAIL items above.\n")
         return 1
 
-    scanner = CallsignScanner(args)
+    web_ui = None
+    if args.web_port:
+        web_ui = WebUI()
+        web_ui.start(args.web_host, args.web_port)
+
+    scanner = CallsignScanner(args, web=web_ui)
 
     def handle_signal(signum, frame):
         log.info("Interrupted")
@@ -1036,6 +1095,8 @@ def main(argv=None) -> int:
     finally:
         scanner.shutdown()
         scanner.report()
+        if web_ui is not None:
+            web_ui.stop()
 
     return 0
 

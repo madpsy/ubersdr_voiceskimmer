@@ -1,8 +1,12 @@
-# Callsign Scanner (proof of concept)
+# ubersdr_voiceskimmer
 
 Hops around detected voice activity, feeds each frequency to the Whisper
 speech-to-text extension, extracts candidate callsigns from the transcript, and
-validates every one against QRZ.
+validates every one against QRZ. Optionally submits confirmed callsigns as real
+DX spots. A live dashboard (transcript, confirmed callsigns, band/freq
+activity, DX spots) is built in — see [Docker / Deployment](#7-docker--deployment)
+to run it as a container alongside UberSDR, or `--web-port` when running from
+source.
 
 The real output is a JSONL log — one record per candidate, with the raw
 transcript that produced it. That file is what tells you whether the approach
@@ -13,13 +17,13 @@ works on your bands and conditions.
 ## 1. Install
 
 ```bash
-cd clients/callsign-scanner
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-Only two dependencies: `requests` and `websocket-client`. No audio codecs — the
-client never decodes audio (see [Why muting is free](#why-muting-is-free)).
+Three dependencies: `requests`, `websocket-client`, and `flask` (for the
+dashboard). No audio codecs — the client never decodes audio (see
+[Why muting is free](#why-muting-is-free)).
 
 ## 2. Check the instance first
 
@@ -59,6 +63,10 @@ still let a scan run, and the output tells you which flags to add.
 ```bash
 .venv/bin/python scanner.py --host 44.31.241.7 --port 8080 --verbose
 ```
+
+A live dashboard is served on `--web-port` (default `6098`, `0` disables it) —
+open `http://localhost:6098/` while it runs for the transcript, confirmed
+callsigns, band/freq activity, and DX spots submitted, updating in real time.
 
 Stop with Ctrl-C; it drains the transcription pipeline and prints a summary.
 
@@ -190,6 +198,60 @@ A full roaming scan across every band, with spot submission on:
 The false-positive tests in `test_phonetics.py` matter more than the positive
 ones — a recall improvement that lets ordinary conversation through is a bad
 trade. `test_rotation.py` guards against camping on one frequency.
+
+## 7. Docker / Deployment
+
+Packaged the same way as the other [ubersdr addons](https://ubersdr.org) —
+a container that runs alongside UberSDR, joined to its `sdr-network`, and
+registered via the Admin → Addon Proxies interface.
+
+**Install** (on the same host as UberSDR):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/madpsy/ubersdr_voiceskimmer/main/install.sh | bash
+```
+
+This fetches `docker-compose.yml` and the helper scripts into
+`~/ubersdr/voiceskimmer/`, starts the container, and prints the addon-proxy
+config to add in UberSDR's Admin UI (`Host: voiceskimmer`, `Port: 6098`,
+`Strip prefix: true`). Edit `~/ubersdr/voiceskimmer/docker-compose.yml` to set
+`UBERSDR_HOST`, `BAND`, `SPOT`/`SPOTTER_CALL`/`SPOTTER_PASS`, etc., then
+`./restart.sh` to apply.
+
+| Script | Does |
+|---|---|
+| `./start.sh` | Start the container |
+| `./stop.sh` | Stop the container |
+| `./restart.sh` | Restart (after editing `docker-compose.yml`) |
+| `./update.sh` | Pull the latest image and restart |
+
+### Environment variables
+
+Every `scanner.py` flag has an environment-variable equivalent (see
+`entrypoint.sh` for the complete, current list). The commonly-used ones:
+
+| Variable | CLI flag | Default |
+|---|---|---|
+| `UBERSDR_HOST` / `UBERSDR_PORT` / `UBERSDR_SSL` / `UBERSDR_PASS` | `--host`/`--port`/`--ssl`/`--password` | `ubersdr` / `8080` / off / — |
+| `BAND` | `--band` | all bands |
+| `DWELL` / `MAX_DWELL` | `--dwell`/`--max-dwell` | `45` / `180` |
+| `MIN_SNR` / `MIN_CONFIDENCE` | `--min-snr`/`--min-confidence` | `8` / `0.7` |
+| `LOCK_FREQ` / `LOCK_MODE` | `--lock-freq`/`--lock-mode` | — (hop normally) |
+| `STOCK_WHISPER` | `--stock-whisper` | off |
+| `SPOT` / `SPOTTER_CALL` / `SPOTTER_PASS` | `--spot`/`--spotter-call`/`--spotter-pass` | off / — / — |
+| `SPOT_TAG` | `--spot-tag` | `[Voice]` |
+| `WEB_PORT` | `--web-port` | `6098` (`0` disables) |
+| `OUTPUT` | `--output` | `/data/detections.jsonl` (persisted via the `voiceskimmer_data` bind mount) |
+| `EXTRA_ARGS` | appended verbatim | — |
+
+### Building the image yourself
+
+```bash
+./docker.sh build          # linux/amd64, loaded locally
+./docker.sh arm64          # linux/arm64
+./docker.sh push           # multi-platform buildx push
+./docker.sh run [args...]  # run locally with env vars from your shell
+```
 
 ---
 
