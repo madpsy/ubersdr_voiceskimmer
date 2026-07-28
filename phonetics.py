@@ -376,10 +376,48 @@ class Candidate:
         return hash((self.callsign, self.source))
 
 
+# Signal reports Whisper writes with a decimal point. Both halves belong to
+# the report, so the whole token goes — see _resolve_decimal_numbers.
+DECIMAL_SIGNAL_REPORTS = {"5.9", "5.9.9", "5.7", "5.8", "5.5", "5.3", "4.9", "3.3"}
+
+_DECIMAL_NUMBER_RE = re.compile(r"\d+(?:\.\d+)+")
+
+
+def _resolve_decimal_numbers(text: str) -> str:
+    """
+    Decide what a decimal-joined number contributes before tokenising.
+
+    Whisper glues a stray leading number onto the front of a spelled
+    callsign with a decimal point — observed live as "2.9 America 8 Delta
+    X-ray" for 9A8DX. Left as "2 9" both digits enter the run, and although
+    the trimming loop can recover the callsign it costs the clean-run
+    confidence bonus, and where several trims are shape-valid it may keep the
+    wrong one. Only the part after the dot is ever callsign material, so the
+    rest is dropped here.
+
+    A report like "5.9" is the exception: both halves are the report, so the
+    whole token goes. Keeping its trailing 9 silently corrupts the callsign
+    that follows — "5.9 Mike Zero Alpha Bravo Golf" became 9M0ABG rather
+    than M0ABG, and since 9M is a valid Malaysian prefix QRZ cannot reject
+    it, so the wrong station gets spotted. That is worse than missing one.
+
+    Safe by construction: no ITU callsign begins with two digits (see
+    CALLSIGN_RE), so a leading digit pair can never be callsign material.
+    """
+    def replace(match: "re.Match[str]") -> str:
+        whole = match.group(0)
+        if whole in DECIMAL_SIGNAL_REPORTS:
+            return " "
+        return " " + whole.split(".")[-1] + " "
+
+    return _DECIMAL_NUMBER_RE.sub(replace, text)
+
+
 def normalise_text(text: str) -> str:
     """Lowercase and strip punctuation that would break tokenisation."""
     text = text.lower()
     text = text.replace("_", " ")
+    text = _resolve_decimal_numbers(text)
     # Keep intra-word hyphens/apostrophes; drop everything else.
     text = re.sub(r"[^a-z0-9'\- ]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
@@ -411,6 +449,10 @@ _CASED_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'-]*")
 
 def _tokenise_cased(text: str) -> List[str]:
     text = text.replace("_", " ")
+    # Must mirror normalise_text exactly, including the decimal handling, or
+    # token i here stops meaning token i there and the spelled-position set
+    # lands on the wrong words.
+    text = _resolve_decimal_numbers(text)
     text = _CASED_STRIP_RE.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return _CASED_TOKEN_RE.findall(text)

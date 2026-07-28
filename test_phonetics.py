@@ -12,6 +12,7 @@ junk, but every rejection is a wasted lookup and a polluted log.
 import unittest
 
 from phonetics import (
+    _tokenise_cased,
     _letter_o_as_zero,
     extract_callsigns,
     is_callsign_shaped,
@@ -320,6 +321,46 @@ class TestLookupGate(unittest.TestCase):
     def test_rejects_non_alphanumeric(self):
         self.assertFalse(is_lookupable("M0-ABC"))
         self.assertFalse(is_lookupable("MM3NDH/P"))
+
+
+class TestDecimalJoinedNumbers(unittest.TestCase):
+    """
+    Whisper glues a stray leading number onto a spelled callsign with a
+    decimal point — observed live as "2.9 America 8 Delta X-ray" for 9A8DX
+    (a real Croatian station). Only the part after the dot can be callsign
+    material, since no ITU callsign begins with two digits.
+    """
+
+    def test_leading_number_before_the_dot_is_dropped(self):
+        self.assertIn("9A8DX", calls("2.9 America 8 Delta X-ray"))
+        self.assertIn("9A5DX", calls("14.9 America 5 Delta X-ray"))
+
+    def test_no_trim_penalty(self):
+        # The digit never enters the run, so this scores the same as if
+        # Whisper had never prefixed it — it does not lose the clean-run bonus.
+        with_prefix = [c for c in extract_callsigns("2.9 America 8 Delta X-ray")
+                       if c.callsign == "9A8DX"][0]
+        clean = [c for c in extract_callsigns("9 America 8 Delta X-ray")
+                 if c.callsign == "9A8DX"][0]
+        self.assertEqual(with_prefix.confidence, clean.confidence)
+
+    def test_signal_report_does_not_corrupt_the_callsign(self):
+        # Both halves of "5.9" are the report. Keeping its trailing 9 gave
+        # 9M0ABG instead of M0ABG — and 9M is a valid Malaysian prefix, so
+        # QRZ cannot reject it and the wrong station gets spotted.
+        self.assertIn("M0ABG", calls("5.9 Mike Zero Alpha Bravo Golf"))
+        self.assertNotIn("9M0ABG", calls("5.9 Mike Zero Alpha Bravo Golf"))
+
+    def test_reports_in_ordinary_speech_extract_nothing(self):
+        for text in ["you are 5.9 in London", "QRG 14.270 and 5.9 to you"]:
+            self.assertEqual(calls(text), [], text)
+
+    def test_token_indices_stay_aligned(self):
+        # _spelled_positions indexes into the lowercase token list, so both
+        # tokenisers must apply the decimal rule identically.
+        for text in ["2.9 America 8 Delta X-ray", "5.9 Mike Zero ABG",
+                     "QRG 14.270 and 5.9 to you"]:
+            self.assertEqual(len(tokenise(text)), len(_tokenise_cased(text)), text)
 
 
 class TestHyphenatedSpelling(unittest.TestCase):
