@@ -68,6 +68,10 @@ A live dashboard is served on `--web-port` (default `6098`, `0` disables it) —
 open `http://localhost:6098/` while it runs for the transcript, confirmed
 callsigns, band/freq activity, and DX spots submitted, updating in real time.
 
+The dashboard's **🔈 Listen** button plays the audio the scanner is currently
+hearing, following it as it hops. See
+[Audio preview](#how-the-audio-preview-works) for what it does server-side.
+
 Stop with Ctrl-C; it drains the transcription pipeline and prints a summary.
 
 **Don't pipe through `tail`** — it buffers everything until exit and you will
@@ -319,6 +323,31 @@ The extension tap is fed in the RTP receive path (`audio.go:286`), upstream of
 the mute check in `streamAudio` (`websocket.go:1618`). So Whisper still receives
 full-rate audio server-side while this client receives no audio bytes at all —
 no Opus, no zstd, no decoding.
+
+### How the audio preview works
+
+The scanner's session is muted, and UberSDR's mute *substitutes silence*
+rather than skipping packets (`websocket.go`, `streamAudio`), so a listener
+attached to it would otherwise hear nothing. The dashboard's Listen button
+unmutes for exactly as long as someone is listening, then re-mutes.
+
+Transcription is unaffected either way: the Whisper tap is fed in the RTP
+receive path (`audio.go`, `SendAudioToExtension`), upstream of the mute check.
+Verified by measurement — the same endpoint yields ~9 kbps muted (Opus
+encoding pure silence) against ~47 kbps unmuted.
+
+Audio comes from UberSDR's `GET /audio/stream?session=<uuid>`
+(`audio_http_stream.go`), which serves WebM/Opus that a plain `<audio>`
+element can play. The backend **relays** it rather than pointing the browser
+at it directly: that URL needs the session UUID, and the dashboard is
+typically reachable by anyone (the addon proxy defaults to
+`allowed_ips: 0.0.0.0/0`, `require_admin: false`). Handing that UUID to every
+visitor would let them retune the scanner's session or spend its QRZ lookup
+quota. Relaying keeps it inside the container and keeps the audio same-origin,
+so it works unchanged behind the addon proxy.
+
+UberSDR allows one HTTP audio consumer per session, so a single upstream
+connection is fanned out to all listeners rather than one per browser tab.
 
 ### Frequency attribution
 

@@ -233,6 +233,11 @@ class CallsignScanner:
             prefilter=not self.args.no_prefilter,
         )
 
+        if self.web:
+            # Lets the dashboard's listen button relay this session's audio.
+            # The session stays muted until someone actually listens.
+            self.web.audio.attach(self.session, self.base_url)
+
         attach_kwargs = {}
         if not self.args.stock_whisper:
             attach_kwargs = {

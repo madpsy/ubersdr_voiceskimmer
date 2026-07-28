@@ -20,6 +20,8 @@
     confirmedBody: document.querySelector("#confirmed-table tbody"),
     spotsBody: document.querySelector("#spots-table tbody"),
     targetsBody: document.querySelector("#targets-table tbody"),
+    listen: document.getElementById("listen"),
+    audio: document.getElementById("audio-el"),
   };
 
   // Client-side copies, keyed the same way the server keeps them, so each
@@ -196,6 +198,46 @@
       .join("");
   }
 
+  // -- Audio preview ---------------------------------------------------------
+
+  // The stream is the scanner's own session relayed by the backend, so it
+  // follows the scanner as it hops rather than being a separate receiver.
+  // Starting it unmutes that session server-side; stopping re-mutes it, so
+  // the src is cleared (not just paused) to actually drop the connection.
+  let listening = false;
+
+  function setListening(on) {
+    listening = on;
+    if (on) {
+      // Cache-bust so a re-listen opens a fresh request rather than resuming
+      // a stale buffered one.
+      els.audio.src = "api/audio?t=" + Date.now();
+      els.audio.play().catch((err) => {
+        console.error("audio play failed", err);
+        setListening(false);
+      });
+    } else {
+      els.audio.pause();
+      els.audio.removeAttribute("src");
+      els.audio.load();
+    }
+    els.listen.classList.toggle("on", on);
+    els.listen.textContent = on ? "🔊 Listening" : "🔈 Listen";
+  }
+
+  els.listen.addEventListener("click", () => setListening(!listening));
+  els.audio.addEventListener("error", () => {
+    if (listening) setListening(false);
+  });
+
+  function renderAudioAvailable(available) {
+    els.listen.disabled = !available;
+    els.listen.title = available
+      ? "Hear what the scanner is tuned to — follows it as it hops"
+      : "Audio session not ready yet";
+    if (!available && listening) setListening(false);
+  }
+
   // -- Full snapshot ----------------------------------------------------------
 
   function applyState(state) {
@@ -210,6 +252,7 @@
     // the live insertBefore behaviour of renderSpotRow.
     [...(state.spots || [])].reverse().forEach(renderSpotRow);
     renderTargets(state.targets);
+    renderAudioAvailable(!!state.audio_available);
   }
 
   // -- Wiring -----------------------------------------------------------------

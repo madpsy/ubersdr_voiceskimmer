@@ -50,6 +50,20 @@
   #current .dx { color: var(--star); }
   #uptime { margin-left: auto; color: var(--dim); font-size: 12px; white-space: nowrap; }
 
+  #listen {
+    background: #21262d;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 5px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #listen:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  #listen.on { background: #113a1e; border-color: var(--good); color: var(--good); }
+  #listen:disabled { opacity: .45; cursor: not-allowed; }
+
   #stats {
     display: flex;
     gap: 18px;
@@ -144,8 +158,10 @@
 <header>
   <h1>📻 Voice Skimmer</h1>
   <div id="current"><span class="empty">waiting for a target…</span></div>
+  <button id="listen" disabled title="Hear what the scanner is tuned to — follows it as it hops">🔈 Listen</button>
   <div id="uptime"></div>
 </header>
+<audio id="audio-el" hidden></audio>
 
 <div id="stats"></div>
 

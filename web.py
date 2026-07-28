@@ -36,12 +36,125 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import requests
 from flask import Flask, Response, jsonify, request
 from werkzeug.serving import make_server
 
 log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+class AudioRelay:
+    """
+    Relays the scanner's own audio to dashboard listeners.
+
+    UberSDR exposes GET /audio/stream?session=<uuid> (audio_http_stream.go),
+    which serves the session's audio as WebM/Opus that a plain <audio> element
+    can play. Rather than pointing the browser straight at it, we proxy it:
+    that URL needs the session UUID, and the dashboard is typically reachable
+    by anyone (the addon proxy defaults to allowed_ips 0.0.0.0/0 with
+    require_admin false). Handing that UUID to every visitor would let them
+    retune the scanner's session or spend its QRZ lookup quota. Relaying keeps
+    it inside the container, and keeps the audio same-origin with the
+    dashboard so it works unchanged behind the addon proxy.
+
+    The scanner's session is muted (see UberSDRSession), and muting
+    substitutes silence rather than skipping packets, so a listener would
+    otherwise hear nothing. We unmute for exactly as long as at least one
+    listener is connected, then re-mute. Transcription is unaffected either
+    way — the Whisper tap is upstream of the mute check.
+
+    UberSDR supports only one HTTP audio consumer per session, so a single
+    upstream connection is fanned out to every listener rather than opening
+    one per browser tab.
+    """
+
+    CHUNK = 4096
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._listeners: List["queue.Queue[Optional[bytes]]"] = []
+        self._session = None
+        self._base_url = ""
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    def attach(self, session, base_url: str) -> None:
+        """Wire in the live UberSDR session once the scanner has opened it."""
+        with self._lock:
+            self._session = session
+            self._base_url = base_url.rstrip("/")
+
+    @property
+    def available(self) -> bool:
+        with self._lock:
+            return self._session is not None
+
+    def subscribe(self) -> "queue.Queue[Optional[bytes]]":
+        q: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=64)
+        with self._lock:
+            self._listeners.append(q)
+            first = len(self._listeners) == 1
+            session = self._session
+        if first and session is not None:
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._pump, daemon=True)
+            self._thread.start()
+            # Unmute only after the upstream tap exists, so audio never takes
+            # the WebSocket path to this client (which would just discard it).
+            session.set_mute(False)
+            log.info("Audio preview started — session unmuted")
+        return q
+
+    def unsubscribe(self, q: "queue.Queue[Optional[bytes]]") -> None:
+        with self._lock:
+            if q in self._listeners:
+                self._listeners.remove(q)
+            last = not self._listeners
+            session = self._session
+        if last:
+            self._stop.set()
+            if session is not None:
+                session.set_mute(True)
+            log.info("Audio preview stopped — session re-muted")
+
+    def _pump(self) -> None:
+        """Single upstream connection, fanned out to every listener."""
+        with self._lock:
+            session, base = self._session, self._base_url
+        if session is None:
+            return
+        url = f"{base}/audio/stream"
+        try:
+            with requests.get(
+                url, params={"session": session.user_session_id},
+                stream=True, timeout=(10, 30),
+            ) as resp:
+                resp.raise_for_status()
+                for chunk in resp.iter_content(self.CHUNK):
+                    if self._stop.is_set():
+                        break
+                    if not chunk:
+                        continue
+                    with self._lock:
+                        subs = list(self._listeners)
+                    for q in subs:
+                        try:
+                            q.put_nowait(chunk)
+                        except queue.Full:
+                            # A stalled listener must not hold up the others.
+                            pass
+        except requests.RequestException as exc:
+            log.warning("Audio relay upstream failed: %s", exc)
+        finally:
+            with self._lock:
+                subs = list(self._listeners)
+            for q in subs:
+                try:
+                    q.put_nowait(None)   # sentinel: end of stream
+                except queue.Full:
+                    pass
 
 
 class WebUI:
@@ -63,6 +176,7 @@ class WebUI:
 
         self._subscribers: List["queue.Queue[str]"] = []
         self._subscribers_lock = threading.Lock()
+        self.audio = AudioRelay()
 
         self._server = None
         self._thread: Optional[threading.Thread] = None
@@ -113,6 +227,39 @@ class WebUI:
             return Response(
                 stream(),
                 mimetype="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        @app.route("/api/audio")
+        def api_audio():
+            """
+            Live audio from whatever the scanner is currently tuned to.
+
+            Follows the scanner as it hops — it is the same session, retuned
+            in place, not a separate receiver.
+            """
+            if not self.audio.available:
+                return jsonify({"error": "audio session not ready"}), 503
+
+            def stream():
+                q = self.audio.subscribe()
+                try:
+                    while True:
+                        try:
+                            chunk = q.get(timeout=30)
+                        except queue.Empty:
+                            break            # upstream went quiet; let the client retry
+                        if chunk is None:
+                            break            # end-of-stream sentinel from the pump
+                        yield chunk
+                finally:
+                    # Runs when the browser stops/closes the <audio> element,
+                    # which is what re-mutes the session.
+                    self.audio.unsubscribe(q)
+
+            return Response(
+                stream(),
+                mimetype="audio/webm",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
@@ -205,6 +352,7 @@ class WebUI:
                 "spots": list(self._spots),
                 "targets": self._targets,
                 "stats": self._stats_payload_locked(),
+                "audio_available": self.audio.available,
             }
 
     # -- Lifecycle ----------------------------------------------------------

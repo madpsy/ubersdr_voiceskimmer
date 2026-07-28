@@ -499,6 +499,22 @@ class UberSDRSession:
                 log.warning("Tune failed: %s", exc)
                 return False
 
+    def set_mute(self, muted: bool) -> None:
+        """
+        Mute or unmute the audio downlink.
+
+        Only affects what this client (or an attached /audio/stream HTTP
+        consumer) receives — the Whisper tap is fed in the RTP receive path
+        (audio.go's SendAudioToExtension), upstream of the mute check in
+        websocket.go's streamAudio, so transcription is unaffected either way.
+
+        Muting does not skip packets, it substitutes silence, so an HTTP
+        audio consumer attached to a muted session hears nothing. The web
+        UI's listen button unmutes for exactly as long as someone is
+        listening — see AudioRelay in web.py.
+        """
+        self._send_audio({"type": "set_mute", "muted": bool(muted)})
+
     def ping(self) -> None:
         """Application-level keepalive, mirroring what the web UI sends."""
         self._send_audio({"type": "ping"})
