@@ -103,23 +103,64 @@
 
   // -- Live transcript ----------------------------------------------------
 
-  function appendTranscript(entry) {
-    const atBottom =
+  // A completed segment is final and gets its own permanent line. An
+  // incomplete one is the utterance currently being refined — WhisperLive
+  // re-sends it as it grows and only one is ever in flight — so it lives in a
+  // single trailing line that is replaced, not appended. This mirrors
+  // static/extensions/whisper/main.js (transcript[] vs lastSegment); appending
+  // each refinement instead renders one utterance as a column of near-
+  // identical lines.
+  let liveLine = null;
+
+  function scrolledToBottom() {
+    return (
       els.transcriptScroll.scrollTop + els.transcriptScroll.clientHeight >=
-      els.transcriptScroll.scrollHeight - 24;
+      els.transcriptScroll.scrollHeight - 24
+    );
+  }
+
+  function lineHTML(entry, marker) {
+    const where = entry.band ? `${entry.band} ${fmtFreq(entry.freq)}` : "";
+    return (
+      `<span class="meta">${fmtTime(entry.time)} ${esc(where)}</span> ` +
+      `<span class="marker">${marker}</span> ${esc(entry.text)}`
+    );
+  }
+
+  function appendTranscript(entry) {
+    const atBottom = scrolledToBottom();
 
     const line = document.createElement("div");
-    const isFinal = entry.marker === "✓"; // ✓
-    line.className = isFinal ? "final" : "partial";
-    const where = entry.band ? `${entry.band} ${fmtFreq(entry.freq)}` : "";
-    line.innerHTML =
-      `<span class="meta">${fmtTime(entry.time)} ${esc(where)}</span> ` +
-      `<span class="marker">${esc(entry.marker)}</span> ${esc(entry.text)}`;
-    els.transcript.appendChild(line);
+    line.className = "final";
+    line.innerHTML = lineHTML(entry, "✓");
+    // Keep the live line last so the in-progress text stays at the bottom.
+    els.transcript.insertBefore(line, liveLine);
 
     while (els.transcript.children.length > TRANSCRIPT_MAX_LINES) {
-      els.transcript.removeChild(els.transcript.firstChild);
+      const first = els.transcript.firstChild;
+      if (first === liveLine) break;
+      els.transcript.removeChild(first);
     }
+    if (atBottom) {
+      els.transcriptScroll.scrollTop = els.transcriptScroll.scrollHeight;
+    }
+  }
+
+  function setLiveTranscript(entry) {
+    const atBottom = scrolledToBottom();
+    if (!entry) {
+      if (liveLine) {
+        liveLine.remove();
+        liveLine = null;
+      }
+      return;
+    }
+    if (!liveLine) {
+      liveLine = document.createElement("div");
+      liveLine.className = "partial";
+      els.transcript.appendChild(liveLine);
+    }
+    liveLine.innerHTML = lineHTML(entry, "…");
     if (atBottom) {
       els.transcriptScroll.scrollTop = els.transcriptScroll.scrollHeight;
     }
@@ -243,7 +284,10 @@
   function applyState(state) {
     renderCurrent(state.current);
     renderStats(state.stats);
+    els.transcript.innerHTML = "";
+    liveLine = null;
     (state.transcript || []).forEach(appendTranscript);
+    setLiveTranscript(state.live || null);
     confirmed.clear();
     (state.confirmed || []).forEach((d) => confirmed.set(d.normalised, d));
     redrawConfirmed();
@@ -266,7 +310,12 @@
     const es = new EventSource("api/events");
     es.addEventListener("state", (e) => applyState(JSON.parse(e.data)));
     es.addEventListener("hop", (e) => renderCurrent(JSON.parse(e.data)));
-    es.addEventListener("transcript", (e) => appendTranscript(JSON.parse(e.data)));
+    es.addEventListener("transcript", (e) => {
+      // A segment completing supersedes the in-progress line it grew from.
+      appendTranscript(JSON.parse(e.data));
+      setLiveTranscript(null);
+    });
+    es.addEventListener("live", (e) => setLiveTranscript(JSON.parse(e.data)));
     es.addEventListener("confirmed", (e) => renderConfirmedRow(JSON.parse(e.data)));
     es.addEventListener("spot", (e) => renderSpotRow(JSON.parse(e.data)));
     es.addEventListener("stats", (e) => renderStats(JSON.parse(e.data)));

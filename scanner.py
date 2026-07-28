@@ -495,13 +495,13 @@ class CallsignScanner:
                 log.info("   %s %s", marker, segment.text)
             if self.web:
                 # Best-effort band/freq context: attribution (below) only
-                # runs for completed segments, but the dashboard wants
-                # partial ("…") lines too, so tag with wherever we're
-                # currently sitting rather than waiting for attribution.
+                # runs for completed segments, but the dashboard shows the
+                # in-progress line too, so tag with wherever we're currently
+                # sitting rather than waiting for attribution.
                 live = self.timeline.current()
                 self.web.push_transcript(
                     live.band if live else "", live.dial_freq if live else 0,
-                    marker, segment.text,
+                    segment.completed, segment.text,
                 )
 
             # Incomplete segments are re-sent repeatedly as Whisper's

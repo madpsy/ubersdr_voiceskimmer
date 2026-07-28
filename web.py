@@ -166,6 +166,9 @@ class WebUI:
 
         self._current: Optional[Dict[str, Any]] = None
         self._transcript: "deque[Dict[str, Any]]" = deque(maxlen=transcript_maxlen)
+        # The single in-flight incomplete segment, replaced as it is refined
+        # and cleared once it completes — see push_transcript.
+        self._live: Optional[Dict[str, Any]] = None
         # Keyed by normalised callsign — latest sighting wins, but first_seen/
         # hit_count accumulate across repeats, mirroring the on-screen
         # "(repeat)" tracking in scanner.py's own self.confirmed dict.
@@ -290,16 +293,30 @@ class WebUI:
             current = self._current
         self._broadcast("hop", current)
 
-    def push_transcript(self, band: str, freq: int, marker: str, text: str) -> None:
-        """marker is "…" for a partial segment, "✓" for a completed one —
-        same convention as the terminal log."""
+    def push_transcript(self, band: str, freq: int, completed: bool, text: str) -> None:
+        """
+        Record a transcript segment.
+
+        Mirrors how the server and the stock UberSDR whisper extension model
+        this (decoder.go processSegments / static/extensions/whisper/main.js):
+        a *completed* segment is final and is appended to the transcript,
+        whereas an *incomplete* one is the current utterance still being
+        refined — WhisperLive re-sends it repeatedly as it grows, and only
+        ever one is in flight. So it replaces the previous live line rather
+        than appending, otherwise one utterance renders as a column of
+        near-identical lines ("… The" / "… The" / "… The …").
+        """
         entry = {
             "time": time.time(), "band": band, "freq": freq,
-            "marker": marker, "text": text,
+            "completed": completed, "text": text,
         }
         with self._lock:
-            self._transcript.append(entry)
-        self._broadcast("transcript", entry)
+            if completed:
+                self._transcript.append(entry)
+                self._live = None
+            else:
+                self._live = entry
+        self._broadcast("transcript" if completed else "live", entry)
 
     def push_confirmed(self, detection: Dict[str, Any], is_repeat: bool) -> None:
         """`detection` is dataclasses.asdict(Detection)."""
@@ -348,6 +365,7 @@ class WebUI:
             return {
                 "current": self._current,
                 "transcript": list(self._transcript),
+                "live": self._live,
                 "confirmed": list(self._confirmed.values()),
                 "spots": list(self._spots),
                 "targets": self._targets,

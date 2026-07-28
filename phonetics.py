@@ -255,6 +255,38 @@ def _token_mapping(token: str) -> Optional[Tuple[str, bool]]:
 CONNECTOR_WORDS = {"and", "uh", "um", "er", "ah", "number"}
 
 
+def _letter_o_as_zero(text: str) -> Optional[str]:
+    """
+    Rescue a spelled run whose zero was heard as the letter O.
+
+    Every ITU callsign carries a digit, so an all-letter run can never be one
+    — but "zero" and "Oscar"/"oh" are among the most-confused pairs on noisy
+    SSB, and Whisper writes the letter either way. Observed live: EOEOJ, which
+    is E0EOJ with the zero lost.
+
+    Returns the single-substitution variant that is callsign-shaped, or None.
+    Tries one O at a time and requires exactly one candidate shape to work, so
+    an ambiguous run is left alone rather than guessed at.
+
+    Deliberately NOT applied to literally-spelled tokens (extract_literal):
+    there the same substitution turns ordinary conversation into callsigns —
+    TOM, NOT, GOT, HOT, JOB, HOUSE, LONDON and friends all become
+    callsign-shaped, and each would cost a QRZ lookup and risk a coincidental
+    hit. A phonetic run is safe because it only exists when someone actually
+    spelled the letters out and the run then cleared the evidence gate; the
+    spoken word "Tom" never forms one, only "Tango Oscar Mike" does.
+    """
+    if "O" not in text or any(ch.isdigit() for ch in text):
+        return None
+    variants = {
+        text[:i] + "0" + text[i + 1:]
+        for i, ch in enumerate(text)
+        if ch == "O"
+    }
+    shaped = [v for v in variants if is_callsign_shaped(v)]
+    return shaped[0] if len(shaped) == 1 else None
+
+
 def _run_evidence(tokens: List[str]) -> Tuple[int, int]:
     """Total (strict_chars, loose_chars) contributed by a token slice."""
     strict_chars = 0
@@ -412,7 +444,9 @@ def extract_phonetic(tokens: List[str], cues: Set[int]) -> List[Candidate]:
                 if len(text) < 3 or len(text) > 10:
                     continue
                 if not is_callsign_shaped(text):
-                    continue
+                    text = _letter_o_as_zero(text)
+                    if text is None:
+                        continue
 
                 run_strict, run_loose = _run_evidence(
                     tokens[start + offset:i - right_trim]

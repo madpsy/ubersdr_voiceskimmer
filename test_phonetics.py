@@ -12,6 +12,7 @@ junk, but every rejection is a wasted lookup and a polluted log.
 import unittest
 
 from phonetics import (
+    _letter_o_as_zero,
     extract_callsigns,
     is_callsign_shaped,
     is_lookupable,
@@ -319,6 +320,64 @@ class TestLookupGate(unittest.TestCase):
     def test_rejects_non_alphanumeric(self):
         self.assertFalse(is_lookupable("M0-ABC"))
         self.assertFalse(is_lookupable("MM3NDH/P"))
+
+
+class TestLetterOHeardAsZero(unittest.TestCase):
+    """
+    "Zero" and "Oscar"/"oh" are among the most-confused pairs on noisy SSB.
+    A run spelled with Oscar where zero was meant has no digit at all, so it
+    fails the ITU shape check outright and never even reaches QRZ — observed
+    live as EOEOJ, which is E0EOJ with the zero lost.
+    """
+
+    def test_rescues_zero_heard_as_oscar(self):
+        self.assertIn(
+            "E0EOJ", [c.callsign for c in extract_callsigns("echo oscar echo oscar juliet")]
+        )
+        self.assertIn(
+            "M0ABC",
+            [c.callsign for c in extract_callsigns("this is mike oscar alpha bravo charlie")],
+        )
+
+    def test_real_digits_are_untouched(self):
+        # The rescue must only fire when there is no digit at all, so a run
+        # that already parsed correctly cannot be rewritten by it.
+        self.assertIn(
+            "M0ABC",
+            [c.callsign for c in extract_callsigns("this is mike zero alpha bravo charlie")],
+        )
+
+    def test_ordinary_speech_is_not_rescued(self):
+        # The same substitution applied to literal text would turn TOM, NOT,
+        # GOT, HOT, JOB, HOUSE and LONDON into callsign shapes. It is confined
+        # to phonetic runs precisely so plain conversation cannot reach it.
+        for text in [
+            "tom is not at home",
+            "it got hot in the house",
+            "my job in london",
+            "roger roger good copy",
+            "the dog and the log",
+            "top of the hour",
+            "i have a radio and a motor",
+        ]:
+            self.assertEqual([c.callsign for c in extract_callsigns(text)], [], text)
+
+    def test_ambiguous_runs_are_left_alone(self):
+        # Adjacent O's make both substitutions land in a valid digit position,
+        # so there is no way to tell which zero was spoken. That is a guess,
+        # not a rescue, so it is refused rather than picked arbitrarily.
+        for ambiguous in ["GOOD", "MOON", "NOON"]:
+            self.assertIsNone(_letter_o_as_zero(ambiguous), ambiguous)
+
+    def test_unambiguous_single_substitution_is_taken(self):
+        # Only one position yields a valid shape here, so there is nothing to
+        # guess between and the rescue applies.
+        self.assertEqual(_letter_o_as_zero("MOTO"), "M0TO")
+
+    def test_no_o_or_already_has_digit(self):
+        self.assertIsNone(_letter_o_as_zero("ABCDE"))
+        self.assertIsNone(_letter_o_as_zero("M0ABC"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
