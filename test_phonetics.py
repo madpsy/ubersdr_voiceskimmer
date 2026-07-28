@@ -322,6 +322,52 @@ class TestLookupGate(unittest.TestCase):
         self.assertFalse(is_lookupable("MM3NDH/P"))
 
 
+class TestSpelledLetterBlocks(unittest.TestCase):
+    """
+    Whisper often writes a callsign suffix as one capitalised letter group
+    ("ABG") rather than separate phonetic words. The vowel-free rule only
+    rescues consonant-only blobs like JXG, so a suffix containing a vowel
+    used to end the run and lose the callsign — observed live, repeatedly:
+    "Yeah, Mike 0 ABG, listing 40s" yielded nothing at all, because M0 on its
+    own is below the 3-character minimum.
+
+    Capitalisation is the discriminator, so these tests deliberately use
+    real-looking mixed-case text rather than pre-lowercased strings.
+    """
+
+    def test_capitalised_suffix_keeps_the_run_alive(self):
+        for text in [
+            "Yeah, Mike 0 ABG, listing 40s.",
+            "Yeah, Mike Zero, ABG, listing 40s.",
+            "Yeah, Mike Zero ABG, listening for",
+        ]:
+            self.assertIn("M0ABG", calls(text), text)
+
+    def test_on_air_abbreviations_are_not_absorbed(self):
+        # These sit next to callsigns constantly and are also written in
+        # caps; absorbing them would corrupt the callsign they follow.
+        for text in [
+            "Yeah, Mike Zero, QSL, listing 40s.",
+            "Mike Zero CQ calling",
+            "Mike Zero DX please",
+        ]:
+            self.assertEqual(calls(text), [], text)
+
+    def test_lowercase_words_are_not_treated_as_letters(self):
+        # Same shape, but not capitalised — an ordinary word, not spelling.
+        self.assertEqual(calls("Yeah, Mike 0 abg, listing 40s."), [])
+
+    def test_capitalised_prose_stays_clean(self):
+        for text in [
+            "This is the BBC news at ten",
+            "The BBC and NBC and CNN",
+            "I live in the USA and work in IT",
+            "My rig is FT DX 10 and the ANT is a dipole",
+            "OK thanks for the QSO and 73",
+        ]:
+            self.assertEqual(calls(text), [], text)
+
+
 class TestLetterOHeardAsZero(unittest.TestCase):
     """
     "Zero" and "Oscar"/"oh" are among the most-confused pairs on noisy SSB.

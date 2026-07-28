@@ -287,13 +287,26 @@ def _letter_o_as_zero(text: str) -> Optional[str]:
     return shaped[0] if len(shaped) == 1 else None
 
 
-def _run_evidence(tokens: List[str]) -> Tuple[int, int]:
-    """Total (strict_chars, loose_chars) contributed by a token slice."""
+def _run_evidence(
+    tokens: List[str], spelled_offsets: Optional[Set[int]] = None
+) -> Tuple[int, int]:
+    """
+    Total (strict_chars, loose_chars) contributed by a token slice.
+
+    `spelled_offsets` are indices WITHIN this slice that Whisper wrote in
+    capitals (see _spelled_positions). They count as strict evidence, exactly
+    as they were mapped when the run was assembled — otherwise a run held
+    together by such a token would be scored as if that token contributed
+    nothing and would fail the gate it just passed.
+    """
+    spelled_offsets = spelled_offsets or set()
     strict_chars = 0
     loose_chars = 0
-    for token in tokens:
+    for idx, token in enumerate(tokens):
         mapping = _token_mapping(token)
         if mapping is None:
+            if idx in spelled_offsets:
+                strict_chars += len(token)
             continue
         chars, is_strict = mapping
         if is_strict:
@@ -376,6 +389,61 @@ def tokenise(text: str) -> List[str]:
     return TOKEN_RE.findall(normalise_text(text))
 
 
+# Written in caps by Whisper but never part of a callsign — the on-air
+# Q-codes and abbreviations that sit right next to one constantly. Without
+# these, "Mike Zero QSL" would assemble as M0QSL. Same reasoning as leaving
+# "roger" out of the letter map.
+CAPS_NON_CALLSIGN = {
+    "QSL", "QRZ", "QRM", "QRN", "QTH", "QSO", "QSY", "QRP", "QRT", "QSB",
+    "CQ", "DX", "CW", "SSB", "FM", "AM", "PM", "USB", "LSB", "RST", "RTTY",
+    "TNX", "THX", "UTC", "GMT", "OM", "YL", "XYL", "PSE", "AGN", "HR", "UR",
+    "WX", "PWR", "RIG", "ANT", "OK", "TV", "USA", "UK", "EU", "US", "ID",
+    "NO", "SO", "IT", "AT", "IN", "ON", "TO", "BE", "WE", "HE", "MY", "BY",
+}
+
+# Same normalisation as normalise_text/tokenise but WITHOUT lowercasing, so
+# token i here is token i there. Case is the signal that separates letters
+# Whisper spelled out ("ABG") from an ordinary word ("and") — see
+# _spelled_positions.
+_CASED_STRIP_RE = re.compile(r"[^A-Za-z0-9'\- ]+")
+_CASED_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'-]*")
+
+
+def _tokenise_cased(text: str) -> List[str]:
+    text = text.replace("_", " ")
+    text = _CASED_STRIP_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return _CASED_TOKEN_RE.findall(text)
+
+
+def _spelled_positions(text: str) -> Set[int]:
+    """
+    Token indices Whisper wrote as a run of capitals — i.e. letters it heard
+    spelled out rather than a word it recognised.
+
+    The vowel-free rule in _token_mapping only rescues consonant-only blobs
+    ("JXG"); a suffix that happens to contain a vowel ("ABG") looks exactly
+    like an ordinary word once tokenise() has lowercased it, so the run
+    breaks and the callsign is lost. Observed live: "Yeah, Mike 0 ABG,
+    listing 40s" yielded nothing, because M0 alone is too short.
+
+    Capitalisation is the discriminator — Whisper writes spelled letters in
+    caps and ordinary words in lower. Sentence-initial words are title case,
+    not all-caps, so they do not qualify. Known on-air abbreviations are
+    excluded outright.
+    """
+    positions: Set[int] = set()
+    for i, tok in enumerate(_tokenise_cased(text)):
+        if (
+            2 <= len(tok) <= 4
+            and tok.isalpha()
+            and tok.isupper()
+            and tok not in CAPS_NON_CALLSIGN
+        ):
+            positions.add(i)
+    return positions
+
+
 def _cue_positions(tokens: List[str]) -> Set[int]:
     """Token indices at which a callsign could plausibly start."""
     positions: Set[int] = set()
@@ -388,12 +456,34 @@ def _cue_positions(tokens: List[str]) -> Set[int]:
     return positions
 
 
-def extract_phonetic(tokens: List[str], cues: Set[int]) -> List[Candidate]:
-    """Find runs of phonetic tokens and promote the plausible ones."""
+def extract_phonetic(
+    tokens: List[str], cues: Set[int], spelled: Optional[Set[int]] = None
+) -> List[Candidate]:
+    """
+    Find runs of phonetic tokens and promote the plausible ones.
+
+    `spelled` holds indices Whisper wrote in capitals, i.e. letters it heard
+    spelled out rather than words — see _spelled_positions. They map to their
+    own letters so a suffix like "ABG" keeps a run going instead of ending it.
+    """
+    spelled = spelled or set()
+
+    def mapping_at(idx: int):
+        m = _token_mapping(tokens[idx])
+        if m is None and idx in spelled:
+            # Strict, not loose: Whisper capitalising a letter group that is
+            # not a known on-air abbreviation is a deliberate signal that it
+            # heard letters spelled, not a word. Counting it loose leaves
+            # genuine callsigns short of the gate — "Mike 0 ABG" scores only
+            # 3.33 as all-loose because "mike" is itself an ambiguous
+            # first-name mapping, so M0ABG was being dropped.
+            return tokens[idx].upper(), True
+        return m
+
     candidates: List[Candidate] = []
     i = 0
     while i < len(tokens):
-        if _token_mapping(tokens[i]) is None:
+        if mapping_at(i) is None:
             i += 1
             continue
 
@@ -404,12 +494,12 @@ def extract_phonetic(tokens: List[str], cues: Set[int]) -> List[Candidate]:
         start = i
         chars: List[str] = []
         while i < len(tokens):
-            mapping = _token_mapping(tokens[i])
+            mapping = mapping_at(i)
             if mapping is None:
                 if (
                     tokens[i] in CONNECTOR_WORDS
                     and i + 1 < len(tokens)
-                    and _token_mapping(tokens[i + 1]) is not None
+                    and mapping_at(i + 1) is not None
                 ):
                     i += 1
                     continue
@@ -448,8 +538,11 @@ def extract_phonetic(tokens: List[str], cues: Set[int]) -> List[Candidate]:
                     if text is None:
                         continue
 
+                slice_start = start + offset
+                slice_end = i - right_trim
                 run_strict, run_loose = _run_evidence(
-                    tokens[start + offset:i - right_trim]
+                    tokens[slice_start:slice_end],
+                    {p - slice_start for p in spelled if slice_start <= p < slice_end},
                 )
 
                 # Evidence gate, weighted rather than a bare token count: 2
@@ -547,9 +640,10 @@ def extract_callsigns(text: str) -> List[Candidate]:
         return []
 
     cues = _cue_positions(tokens)
+    spelled = _spelled_positions(text)
 
     candidates = extract_literal(text, tokens, cues)
-    candidates.extend(extract_phonetic(tokens, cues))
+    candidates.extend(extract_phonetic(tokens, cues, spelled))
 
     # Deduplicate, keeping the highest-confidence instance of each callsign.
     best: Dict[str, Candidate] = {}
