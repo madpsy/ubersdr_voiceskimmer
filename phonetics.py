@@ -416,7 +416,49 @@ def _tokenise_cased(text: str) -> List[str]:
     return _CASED_TOKEN_RE.findall(text)
 
 
-def _spelled_positions(text: str) -> Set[int]:
+def _split_hyphen_runs(
+    tokens: List[str], cased: List[str]
+) -> Tuple[List[str], List[str]]:
+    """
+    Split "Hotel-Alpha-Phi-Juliet-India" into its phonetic words.
+
+    Whisper routinely hyphenates a spelled callsign rather than spacing it,
+    and the joined token maps to nothing, so the run ends and the callsign is
+    lost entirely. Observed live throughout: "Kilo-Five", "Kilo-5-4-1-yard",
+    "Alpha-3-Zo", "Hotel-Alpha-Phi-Juliet-India".
+
+    Only splits when the whole token maps to nothing AND every part maps on
+    its own, so the two hyphenated forms that already work are untouched:
+    "x-ray" maps as a whole, and "i-0-w-f-t" is handled by the single-char
+    rule in _token_mapping. Splitting rather than joining in _token_mapping
+    keeps each part's own strict/loose weight for the evidence gate — mapping
+    the whole thing to one loose blob would score HA5JI below the threshold.
+
+    Both token lists are split in lockstep so index i still means the same
+    token in each, which the cue and spelled-position sets rely on.
+    """
+    out_lower: List[str] = []
+    out_cased: List[str] = []
+    for lower, orig in zip(tokens, cased):
+        parts = lower.split("-")
+        if (
+            len(parts) >= 2
+            and all(parts)
+            and _token_mapping(lower) is None
+            and all(_token_mapping(p) is not None for p in parts)
+        ):
+            cased_parts = orig.split("-")
+            if len(cased_parts) != len(parts):
+                cased_parts = parts        # keep the lists aligned regardless
+            out_lower.extend(parts)
+            out_cased.extend(cased_parts)
+        else:
+            out_lower.append(lower)
+            out_cased.append(orig)
+    return out_lower, out_cased
+
+
+def _spelled_positions_from(cased: List[str]) -> Set[int]:
     """
     Token indices Whisper wrote as a run of capitals — i.e. letters it heard
     spelled out rather than a word it recognised.
@@ -433,7 +475,7 @@ def _spelled_positions(text: str) -> Set[int]:
     excluded outright.
     """
     positions: Set[int] = set()
-    for i, tok in enumerate(_tokenise_cased(text)):
+    for i, tok in enumerate(cased):
         if (
             2 <= len(tok) <= 4
             and tok.isalpha()
@@ -639,8 +681,13 @@ def extract_callsigns(text: str) -> List[Candidate]:
     if not tokens:
         return []
 
+    # Split hyphen-joined spellings before anything indexes into the tokens,
+    # so the cue and spelled-position sets are computed against the final
+    # list rather than a pre-split one.
+    tokens, cased = _split_hyphen_runs(tokens, _tokenise_cased(text))
+
     cues = _cue_positions(tokens)
-    spelled = _spelled_positions(text)
+    spelled = _spelled_positions_from(cased)
 
     candidates = extract_literal(text, tokens, cues)
     candidates.extend(extract_phonetic(tokens, cues, spelled))

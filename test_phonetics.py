@@ -322,6 +322,38 @@ class TestLookupGate(unittest.TestCase):
         self.assertFalse(is_lookupable("MM3NDH/P"))
 
 
+class TestHyphenatedSpelling(unittest.TestCase):
+    """
+    Whisper routinely hyphenates a spelled callsign instead of spacing it.
+    The joined token maps to nothing, so the run ended there and the whole
+    callsign was lost — every one of these produced no candidate at all.
+    """
+
+    def test_hyphenated_phonetics_are_split(self):
+        self.assertIn("HA5JI", calls("Hotel-Alpha-Phi-Juliet-India"))
+        self.assertIn("M0ABG", calls("Mike-Zero-Alpha-Bravo-Golf"))
+        self.assertIn("GM6ZAK", calls("this is Golf-Mike-6-Zulu-Alpha-Kilo"))
+
+    def test_xray_still_maps_as_one_word(self):
+        # "x-ray" is a phonetic word in its own right; splitting it would
+        # give X + RAY and lose the letter.
+        self.assertIn("XA5B", calls("this is x-ray alpha 5 bravo"))
+
+    def test_single_char_hyphen_form_unchanged(self):
+        # "I-0-W-F-T" is handled by the single-char rule in _token_mapping
+        # and must not be re-split by this.
+        self.assertIn("I0WFT", calls("this is I-0-W-F-T"))
+
+    def test_hyphenated_prose_stays_clean(self):
+        for text in [
+            "a well-known state-of-the-art radio",
+            "my father-in-law is here",
+            "the twenty-five year old rig",
+            "five-nine plus twenty",
+        ]:
+            self.assertEqual(calls(text), [], text)
+
+
 class TestSpelledLetterBlocks(unittest.TestCase):
     """
     Whisper often writes a callsign suffix as one capitalised letter group
