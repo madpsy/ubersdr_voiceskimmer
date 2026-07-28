@@ -8,7 +8,7 @@
 #   UBERSDR_PASS          Bypass password, if the instance needs one
 #   BAND                  Comma-separated band list             e.g. 20m,40m
 #                         (default: all bands)
-#   DWELL                 Seconds per frequency                 (default: 45)
+#   DWELL                 Seconds per frequency                 (default: 30)
 #   MAX_DWELL             Hard ceiling per frequency             (default: 180)
 #   MIN_SNR               Ignore activity below this SNR         (default: 8)
 #   MIN_CONFIDENCE        Ignore activity below this confidence   (default: 0.7)

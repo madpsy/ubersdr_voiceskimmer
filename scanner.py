@@ -952,7 +952,7 @@ def parse_args(argv=None):
                            "tracker subscribes unfiltered and filters "
                            "client-side instead — functionally identical, "
                            "just slightly more data over the wire.")
-    scan.add_argument("--dwell", type=float, default=45.0,
+    scan.add_argument("--dwell", type=float, default=30.0,
                       help="Seconds to listen on each frequency")
     scan.add_argument("--dwell-extension", type=float, default=30.0,
                       help="Extra seconds when something callsign-shaped is "

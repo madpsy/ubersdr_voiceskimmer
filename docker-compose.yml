@@ -15,7 +15,7 @@ services:
       # BAND: "20m,40m"
       #
       # Dwell tuning (seconds)
-      # DWELL: "45"
+      # DWELL: "30"
       # MAX_DWELL: "180"
       #
       # Ignore weak/uncertain voice activity
