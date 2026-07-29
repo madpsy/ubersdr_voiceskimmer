@@ -850,6 +850,25 @@ class CallsignScanner:
                     self.args.spot_min_length,
                 )
             return
+
+        # Corroboration gate. Counted only for candidates that already cleared
+        # the quality gates above, so it measures spottable decodes rather
+        # than every scrap the extractor produced. The extractor can assemble
+        # a plausible-but-wrong callsign from one garbled pass, but it is
+        # unlikely to invent the same wrong one twice on the same frequency —
+        # so requiring more than one hearing trades a little latency for a
+        # markedly lower chance of spotting a station that was never there.
+        hits = self.spot_throttle.record_hit(
+            detection.normalised, detection.frequency
+        )
+        if hits < self.args.spot_min_hits:
+            log.info(
+                "   – %s heard %d/%d times on %.3f MHz — not spotted yet",
+                detection.normalised, hits, self.args.spot_min_hits,
+                detection.frequency / 1e6,
+            )
+            return
+
         if not self.spot_throttle.should_spot(detection.normalised, detection.frequency):
             return
 
@@ -1156,6 +1175,18 @@ def parse_args(argv=None):
                          "\"[Voice]\"), e.g. \"[Voice] <QRZ name>\" — "
                          "distinguishes these from manually-submitted or "
                          "CW-skimmer spots in anyone else's cluster view.")
+    dx.add_argument("--spot-min-hits", type=int, default=1,
+                    help="Times the same callsign must be decoded on the same "
+                         "frequency before it is spotted (default 1 — spot on "
+                         "the first decode). Above 1 this trades latency for "
+                         "confidence: the extractor can assemble a "
+                         "plausible-but-wrong callsign from one garbled pass, "
+                         "but is unlikely to invent the same wrong one twice "
+                         "on the same frequency. Frequency is matched with the "
+                         "same tolerance as the cooldown, so a drifting "
+                         "estimate does not restart the tally, and the count "
+                         "is never reset — a station that has proved itself "
+                         "does not have to prove it again after the cooldown.")
     dx.add_argument("--spot-min-length", type=int, default=4,
                     help="Minimum character length required before a "
                          "phonetically-assembled callsign is spotted "

@@ -100,5 +100,45 @@ class TestSpotThrottle(unittest.TestCase):
         self.assertFalse(t.should_spot("C", 14260000))
 
 
+
+
+class TestSpotMinHits(unittest.TestCase):
+    """
+    Requiring the same callsign on the same frequency more than once before
+    spotting. The extractor can assemble a plausible-but-wrong callsign from
+    one garbled pass, but is unlikely to invent the same wrong one twice on
+    the same frequency, so repeat hearings are real corroboration.
+    """
+
+    def test_hits_accumulate_per_callsign_and_frequency(self):
+        t = SpotThrottle(freq_tolerance_hz=100)
+        self.assertEqual(t.record_hit("M0ABC", 14270000), 1)
+        self.assertEqual(t.record_hit("M0ABC", 14270000), 2)
+        # A different frequency, and a different callsign, each start over.
+        self.assertEqual(t.record_hit("M0ABC", 14280000), 1)
+        self.assertEqual(t.record_hit("G4XYZ", 14270000), 1)
+
+    def test_drifting_frequency_does_not_restart_the_tally(self):
+        # The detector's estimate wobbles between hearings; the same
+        # bucketing as the cooldown keeps them counting as one station.
+        t = SpotThrottle(freq_tolerance_hz=100)
+        t.record_hit("M0ABC", 14270000)
+        t.record_hit("M0ABC", 14270050)
+        self.assertEqual(t.record_hit("M0ABC", 14269960), 3)
+
+    def test_hits_query_does_not_count(self):
+        t = SpotThrottle(freq_tolerance_hz=100)
+        t.record_hit("M0ABC", 14270000)
+        self.assertEqual(t.hits("M0ABC", 14270000), 1)
+        self.assertEqual(t.hits("M0ABC", 14270000), 1)
+        self.assertEqual(t.hits("NEVER", 14270000), 0)
+
+    def test_bounded_like_the_cooldown(self):
+        t = SpotThrottle(max_entries=5, freq_tolerance_hz=100)
+        for i in range(20):
+            t.record_hit(f"CALL{i}", 14000000 + i * 10000)
+        self.assertLessEqual(len(t._hits), 5)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

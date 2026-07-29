@@ -33,6 +33,8 @@
 #   SPOT_COOLDOWN         Seconds before re-spotting the same station (default: 900)
 #   SPOT_FREQ_TOLERANCE   Hz tolerance for the spot cooldown       (default: 100)
 #   SPOT_MIN_LENGTH       Minimum callsign length to spot          (default: 4)
+#   SPOT_MIN_HITS         Decodes of the same callsign on the same frequency
+#                         required before spotting (default: 1)
 #   WEB_PORT              Dashboard port                          (default: 6098, 0 disables)
 #   OUTPUT                JSONL detection log path                (default: /data/detections.jsonl)
 #   VERBOSE               Set to 1 for verbose logging
@@ -68,6 +70,7 @@ args=""
 [ -n "$SPOT_COOLDOWN"        ] && args="$args --spot-cooldown $SPOT_COOLDOWN"
 [ -n "$SPOT_FREQ_TOLERANCE"  ] && args="$args --spot-freq-tolerance $SPOT_FREQ_TOLERANCE"
 [ -n "$SPOT_MIN_LENGTH"      ] && args="$args --spot-min-length $SPOT_MIN_LENGTH"
+[ -n "$SPOT_MIN_HITS"        ] && args="$args --spot-min-hits $SPOT_MIN_HITS"
 
 [ -n "$WEB_PORT"             ] && args="$args --web-port $WEB_PORT"
 

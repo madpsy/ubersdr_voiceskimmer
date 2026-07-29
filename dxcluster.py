@@ -188,11 +188,45 @@ class SpotThrottle:
         # only needs to be approximately right.)
         self._bucket_hz = max(1, freq_tolerance_hz * 2)
         self._last_spot: "OrderedDict[Tuple[str, int], float]" = OrderedDict()
+        # Validated decodes per (callsign, frequency) — see record_hit.
+        # Bounded the same way, so a long run cannot grow it unboundedly.
+        self._hits: "OrderedDict[Tuple[str, int], int]" = OrderedDict()
         self._lock = threading.Lock()
 
     def _key(self, callsign: str, freq_hz: int) -> Tuple[str, int]:
         bucket = round(freq_hz / self._bucket_hz) * self._bucket_hz
         return (callsign, bucket)
+
+    def record_hit(self, callsign: str, freq_hz: int) -> int:
+        """
+        Count one validated decode of this callsign on this frequency, and
+        return the running total.
+
+        Hearing the same callsign on the same frequency repeatedly is real
+        corroboration: the extractor can assemble a plausible-but-wrong
+        callsign from one garbled pass, but it is unlikely to invent the same
+        wrong one twice on the same frequency. Callers use this to hold a spot
+        back until it has been decoded --spot-min-hits times.
+
+        Shares the frequency bucketing with the cooldown, so the detector's
+        estimate drifting a few Hz between hearings still counts as the same
+        station rather than restarting the tally.
+
+        The count is never reset. Once a station has proved itself it stays
+        proved, so a re-spot after the cooldown does not have to earn its
+        confidence again.
+        """
+        key = self._key(callsign, freq_hz)
+        with self._lock:
+            count = self._hits.pop(key, 0) + 1   # drop-then-add keeps it fresh
+            self._hits[key] = count
+            while len(self._hits) > self.max_entries:
+                self._hits.popitem(last=False)
+            return count
+
+    def hits(self, callsign: str, freq_hz: int) -> int:
+        with self._lock:
+            return self._hits.get(self._key(callsign, freq_hz), 0)
 
     def should_spot(self, callsign: str, freq_hz: int) -> bool:
         """True if this pair has never been spotted, or the cooldown since

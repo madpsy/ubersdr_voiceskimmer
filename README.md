@@ -144,6 +144,7 @@ exact frequency, so on a quiet instance expect zeroes.
 | Flag | Default | Why change it |
 |---|---|---|
 | `--band 20m,40m` | all | Restrict to one or more bands (comma-separated) |
+| `--parallel` | 1 | Scanning sessions to run at once, each on its own frequency. Every one holds a Whisper slot, and the server's `whisper.max_users` defaults to **2** — so 2 here uses every slot and leaves none for web UI users |
 | `--dwell` | 30 s | Base listen time per frequency (~2 VAD segments) |
 | `--max-dwell` | 180 s | Ceiling, so a busy net cannot hold the scanner |
 | `--silence-timeout` | 10 s | Move on early if nothing is heard at all — dead air, not a real dwell |
@@ -179,6 +180,7 @@ callsign and password to log in with.
 | `--spot-freq-tolerance` | 100 Hz | Frequency tolerance for the cooldown, since the detector's dial-frequency estimate can wobble slightly between hearings |
 | `--spot-max-entries` | 1000 | Cap on remembered cooldown entries, oldest/least-recent evicted first |
 | `--spot-min-length` | 4 | Minimum candidate length before a phonetically-assembled callsign is spotted (literal verbatim matches are exempt) |
+| `--spot-min-hits` | 1 | Decodes of the same callsign on the same frequency required before spotting. Above 1 trades latency for confidence — a wrong callsign assembled from one garbled pass is unlikely to be assembled identically again |
 | `--spot-tag` | `[Voice]` | Tag prefixed to every spot comment |
 
 Comments are tagged `<tag> <QRZ name>` (default tag `[Voice]`, truncated to
@@ -243,6 +245,8 @@ Every `scanner.py` flag has an environment-variable equivalent (see
 | `LOCK_FREQ` / `LOCK_MODE` | `--lock-freq`/`--lock-mode` | — (hop normally) |
 | `STOCK_WHISPER` | `--stock-whisper` | off |
 | `SPOT` / `SPOTTER_CALL` / `SPOTTER_PASS` | `--spot`/`--spotter-call`/`--spotter-pass` | off / — / — |
+| `SPOT_MIN_HITS` | `--spot-min-hits` | `1` |
+| `PARALLEL` | `--parallel` | `1` (see below) |
 | `SPOT_TAG` | `--spot-tag` | `[Voice]` |
 | `WEB_PORT` | `--web-port` | `6098` (`0` disables) |
 | `OUTPUT` | `--output` | `/data/detections.jsonl` (persisted via the `voiceskimmer_data` bind mount) |
