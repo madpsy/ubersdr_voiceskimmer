@@ -562,15 +562,19 @@ class WebUI:
 
     def push_spot(
         self, callsign: str, freq: int, comment: str, freq_bucket: int,
-        band: str = "",
+        band: str = "", country_code: str = "", country: str = "",
     ) -> None:
-        # Band travels with the spot rather than being re-derived from the
-        # frequency in the browser: the server already named it, and a second
-        # band plan in the frontend could disagree with the one every other
-        # table is coloured and labelled by.
+        # Band and country travel with the spot rather than being worked out
+        # in the browser. The server already resolved both, and the frontend's
+        # job is to render what it is given: re-deriving the band from the
+        # frequency risks a second band plan that disagrees with every other
+        # table, and mapping a country NAME to a flag would be wrong for
+        # exactly the entities this hears most (England, Scotland and Wales
+        # are three DXCC entities and one ISO country).
         key = f"{callsign}|{freq_bucket}"
         entry = {
             "time": time.time(), "callsign": callsign, "band": band,
+            "country_code": country_code, "country": country,
             "freq": freq, "comment": comment, "key": key,
         }
         with self._lock:

@@ -168,7 +168,8 @@ let src = fs.readFileSync(APP, "utf8");
 const HOOK =
   "\n  globalThis.__test = { applyState, renderConfirmedRow, renderSpotRow," +
   " renderTargets, appendTranscript, setLiveTranscript, redrawConfirmed," +
-  " redrawSpots, bandClass, mapStations, tooltipHTML, panels };\n})();\n";
+  " redrawSpots, bandClass, mapStations, tooltipHTML, countryFlag," +
+  " flagHTML, panels, els };\n})();\n";
 const patched = src.replace(/\n\}\)\(\);\s*$/, HOOK);
 assert.notStrictEqual(patched, src, "could not find the IIFE close in app.js");
 
@@ -214,11 +215,12 @@ check("a full state snapshot renders", () => {
         key: "G0VIM|14226000", normalised: "G0VIM", band: "20m",
         frequency: 14226000, mode: "usb", name: "Malcolm", country: "England",
         latitude: 52.2, longitude: -0.9, timestamp: 1, first_seen: 1,
-        hit_count: 2, spotted_at: 2,
+        country_code: "GB", hit_count: 2, spotted_at: 2,
       },
     ],
     spots: [
       { key: "G0VIM|14226000", time: 2, callsign: "G0VIM", band: "20m",
+        country_code: "GB", country: "England",
         freq: 14226000, comment: "[Voice] Malcolm" },
     ],
     targets: [
@@ -233,6 +235,48 @@ check("band colours agree across surfaces", () => {
   assert.strictEqual(T.bandClass("20m"), T.bandClass("20m"));
   assert.notStrictEqual(T.bandClass("20m"), T.bandClass("40m"));
   assert.strictEqual(T.bandClass(""), "");
+});
+
+check("country codes become flags", () => {
+  // Regional Indicator pair for GB.
+  assert.strictEqual(T.countryFlag("GB"), "\u{1F1EC}\u{1F1E7}");
+  assert.strictEqual(T.countryFlag("gb"), "\u{1F1EC}\u{1F1E7}");
+  // Anything that is not two letters yields nothing rather than mojibake.
+  for (const bad of ["", null, undefined, "G", "GBR", "G1", "12"]) {
+    assert.strictEqual(T.countryFlag(bad), "", JSON.stringify(bad));
+  }
+});
+
+check("flag markup carries the country as a tooltip", () => {
+  const html = T.flagHTML("GB", 'England "home"');
+  assert.ok(html.includes('class="flag"'));
+  // The country name reaches an attribute, so quotes must be escaped or it
+  // breaks out of the title.
+  assert.ok(!/title="[^"]*"[^>]*"/.test(html), "unescaped quote in title");
+  assert.strictEqual(T.flagHTML("", "Nowhere"), "");
+});
+
+check("flags render beside callsigns in both tables", () => {
+  const conf = byId["confirmed-filter"];
+  conf.value = "";
+  T.redrawConfirmed();
+  T.redrawSpots();
+  assert.ok(
+    T.els.confirmedBody.innerHTML.includes("flag"),
+    "no flag in the confirmed table"
+  );
+  // The spot carries its own country_code from the backend; the frontend
+  // does not look it up or derive it.
+  assert.ok(
+    T.els.spotsBody.innerHTML.includes("flag"),
+    "no flag in the spots table"
+  );
+});
+
+check("map tooltip leads with the flag", () => {
+  const s = T.mapStations().get("G0VIM");
+  const tip = T.tooltipHTML(s);
+  assert.ok(tip.indexOf("flag") < tip.indexOf("G0VIM"), "flag not left of callsign");
 });
 
 check("map groups rows by callsign", () => {

@@ -136,6 +136,34 @@
     return esc(s).replace(/"/g, "&quot;");
   }
 
+  // -- Country flags --------------------------------------------------------
+
+  // An ISO 3166-1 alpha-2 code as a flag: the two Regional Indicator symbols
+  // for its letters. Same construction as ubersdr_dxcluster's countryFlag.
+  //
+  // The code comes from the CTY block of the lookup response, never from
+  // matching the country NAME — DXCC entity names are not ISO names, and the
+  // stations this hears most are the worst cases ("England", "Scotland" and
+  // "Wales" are all GB, and none of them is an ISO country).
+  function countryFlag(code) {
+    if (!code || code.length !== 2 || !/^[a-z]{2}$/i.test(code)) return "";
+    const base = 0x1f1e6 - 65;
+    const up = code.toUpperCase();
+    return (
+      String.fromCodePoint(up.charCodeAt(0) + base) +
+      String.fromCodePoint(up.charCodeAt(1) + base)
+    );
+  }
+
+  // Rendered with the country name as a tooltip so the flag is not the only
+  // way to read it — several are hard to tell apart at 12px.
+  function flagHTML(code, country) {
+    const flag = countryFlag(code);
+    if (!flag) return "";
+    const label = country || code;
+    return `<span class="flag" title="${escAttr(label)}">${flag}</span>`;
+  }
+
   // QRZ names run from a first name to a full legal name to a club-station
   // description, and a long one stretches the column until the rest of the
   // table is pushed off screen. Truncated rather than wrapped so every row
@@ -468,6 +496,7 @@
         s = {
           call: d.normalised, lat: d.latitude, lon: d.longitude,
           name: d.name || "", country: d.country || "",
+          countryCode: d.country_code || "",
           spotted: false, rows: [],
         };
         byCall.set(d.normalised, s);
@@ -494,7 +523,8 @@
       })
       .join("");
     return (
-      `<div class="map-tip"><span class="call">${esc(s.call)}</span>` +
+      `<div class="map-tip">${flagHTML(s.countryCode, s.country)}` +
+      `<span class="call">${esc(s.call)}</span>` +
       (who ? ` <span class="who">${esc(who)}</span>` : "") +
       `<div class="rows">${rows}</div></div>`
     );
@@ -784,7 +814,8 @@
         }
         return (
           `<tr class="${bandClass(d.band)}">` +
-          `<td class="call">${star}${esc(d.normalised)}</td>` +
+          `<td class="call">${star}${flagHTML(d.country_code, d.country)}` +
+          `${esc(d.normalised)}</td>` +
           `<td>${esc(d.band)}</td><td>${fmtFreq(d.frequency)}</td>` +
           `<td>${esc((d.mode || "").toUpperCase())}</td>` +
           nameCell(d.name) +
@@ -838,7 +869,8 @@
         (s) =>
           `<tr class="${bandClass(s.band)}">` +
           `<td>${fmtTime(s.time)}</td>` +
-          `<td class="call">${esc(s.callsign)}</td>` +
+          `<td class="call">${flagHTML(s.country_code, s.country)}` +
+          `${esc(s.callsign)}</td>` +
           `<td>${fmtFreq(s.freq)}</td><td>${esc(s.comment)}</td></tr>`
       )
       .join("");

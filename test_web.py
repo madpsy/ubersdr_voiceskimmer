@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 
+from lookup import CallsignValidator
 from web import RateLimiter, WebUI, client_ip
 
 
@@ -185,6 +186,35 @@ class TestExplainEndpoint(unittest.TestCase):
         # polls /api/state on load and must not be throttled with it.
         for _ in range(5):
             self.assertEqual(self.client.get("/api/state").status_code, 200)
+
+
+class TestCountryCode(unittest.TestCase):
+    """
+    The dashboard's flags key on the ISO code from the lookup response's CTY
+    block, never on the country NAME. DXCC entity names are not ISO names and
+    the stations this hears most are the worst cases — England, Scotland and
+    Wales are three DXCC entities and one ISO country (GB), and Japan's CTY
+    country_code is JP while its amateur prefix is JA.
+    """
+
+    def test_extracts_the_iso_code(self):
+        r = CallsignValidator._parse("G0VIM", {
+            "callsign": "G0VIM", "fname": "Malcolm",
+            "cty": {"country": "England", "country_code": "GB",
+                    "continent": "EU", "latitude": 52.77, "longitude": -1.47},
+        })
+        self.assertEqual(r.country_code, "GB")
+        self.assertEqual(r.country, "England")
+
+    def test_normalises_case(self):
+        r = CallsignValidator._parse("X", {"cty": {"country_code": "de"}})
+        self.assertEqual(r.country_code, "DE")
+
+    def test_absent_cty_block_is_not_an_error(self):
+        # QRZ can answer without a CTY augmentation; the flag is simply
+        # omitted rather than the lookup failing.
+        r = CallsignValidator._parse("X", {"callsign": "X"})
+        self.assertEqual(r.country_code, "")
 
 
 if __name__ == "__main__":

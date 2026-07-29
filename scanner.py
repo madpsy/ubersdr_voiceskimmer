@@ -83,6 +83,7 @@ class Detection:
     lookup_summary: str
     name: str = ""
     country: str = ""
+    country_code: str = ""      # ISO 3166-1 alpha-2, for the dashboard's flags
     grid: str = ""
     # QRZ carries coordinates for most callsigns; lookup.py falls back to the
     # DXCC entity centre from CTY when it does not, which is coarse but still
@@ -959,7 +960,7 @@ class CallsignScanner:
                 self.web.push_spot(
                     detection.normalised, detection.frequency, comment,
                     self.spot_throttle.bucket_freq(detection.frequency),
-                    detection.band,
+                    detection.band, detection.country_code, detection.country,
                 )
 
     def _build_detection(
@@ -990,6 +991,7 @@ class CallsignScanner:
             lookup_summary=result.summary,
             name=result.name,
             country=result.country,
+            country_code=result.country_code,
             grid=result.grid,
             latitude=result.latitude,
             longitude=result.longitude,

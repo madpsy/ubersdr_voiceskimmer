@@ -46,6 +46,12 @@ class LookupResult:
     checked: bool                    # False if we never got a definitive answer
     name: str = ""
     country: str = ""
+    # ISO 3166-1 alpha-2, from the CTY augmentation block. Worth keeping
+    # separate from `country`: DXCC entity names are not ISO names, and
+    # mapping one to the other by string is exactly where a flag lookup goes
+    # wrong — "England" is not an ISO country, but CTY already resolves it
+    # to GB for us.
+    country_code: str = ""
     continent: str = ""
     grid: str = ""
     latitude: Optional[float] = None
@@ -287,6 +293,7 @@ class CallsignValidator:
                 or pick("name_fmt", "name", "callsign_name")
             ),
             country=pick("country") or cty.get("country", ""),
+            country_code=(cty.get("country_code") or "").upper(),
             continent=cty.get("continent", ""),
             grid=pick("grid", "locator"),
             latitude=float(lat) if isinstance(lat, (int, float)) else None,
