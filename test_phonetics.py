@@ -323,6 +323,44 @@ class TestLookupGate(unittest.TestCase):
         self.assertFalse(is_lookupable("MM3NDH/P"))
 
 
+class TestSplitPrefixCallsigns(unittest.TestCase):
+    """
+    Operators pause between the prefix and the suffix, so Whisper writes the
+    callsign as two tokens — "F4 LVF". The literal matcher needs it whole and
+    the phonetic path had no rule for an alphanumeric prefix, so it produced
+    nothing at all. Observed live on 7.155 for F4LVF.
+    """
+
+    def test_prefix_and_suffix_as_separate_tokens(self):
+        self.assertIn("F4LVF", calls("F4 LVF"))
+        self.assertIn("M0ABC", calls("this is M0 ABC calling"))
+        self.assertIn("MM3NDH", calls("MM3 NDH here"))
+        self.assertIn("G3VCG", calls("G3 VCG portable"))
+
+    def test_recovers_from_a_longer_garbled_run(self):
+        # The real capture: an earlier failed attempt at the same callsign
+        # runs straight into the good one, giving a single seven-element run
+        # spelling 4LVF30F4LVF. The trimming has to reach the end of it.
+        self.assertIn("F4LVF", calls("LVF, in 4 Lima Victor Foxx-30, F4 LVF,"))
+
+    def test_on_air_alphanumerics_are_not_callsign_material(self):
+        # Same shape, said constantly, never part of a callsign.
+        for text in [
+            "you are S9 here",
+            "running FT8 on 20m",
+            "we use FT4 and JS8 modes",
+            "about 40s ago",
+            "the 20m band is open",
+        ]:
+            self.assertEqual(calls(text), [], text)
+
+    def test_capitalised_phonetic_words_are_not_split_into_letters(self):
+        # ECHO is four capitals, but it is a phonetic word meaning E — it must
+        # not be read as four spelled letters.
+        self.assertIn("GL5K", calls("ECHO GOLF LIMA 5 KILO"))
+        self.assertIn("G4AB", calls("GOLF 4 ALPHA BRAVO"))
+
+
 class TestDecimalJoinedNumbers(unittest.TestCase):
     """
     Whisper glues a stray leading number onto a spelled callsign with a

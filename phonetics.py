@@ -208,6 +208,19 @@ FULL_MAP = {**LOOSE_MAP, **STRICT_MAP}  # strict wins on collision
 _VOWELS = set("aeiouy")  # y counted so "by", "my", "sky", "gym" don't qualify
 
 
+# A bare callsign prefix: one or two letters then one or two digits.
+# Deliberately does not match digits-first forms ("40s", "20m", "73").
+PREFIX_TOKEN_RE = re.compile(r"^[a-z]{1,2}[0-9]{1,2}$")
+
+# Same shape, but said constantly on air and never part of a callsign:
+# signal strengths, readability, and the digital mode names.
+ALNUM_NON_CALLSIGN = {
+    "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9",
+    "R1", "R2", "R3", "R4", "R5",
+    "Q5", "FT8", "FT4", "JS8", "PSK", "AM", "FM",
+}
+
+
 def _token_mapping(token: str) -> Optional[Tuple[str, bool]]:
     """Return (chars, is_strict) if `token` contributes to a callsign run."""
     if token in STRICT_MAP:
@@ -239,6 +252,17 @@ def _token_mapping(token: str) -> Optional[Tuple[str, bool]]:
         parts = token.split("-")
         if len(parts) >= 2 and all(len(p) == 1 and p.isalnum() for p in parts):
             return "".join(parts).upper(), False
+    # A bare callsign prefix ("F4", "M0", "MM3"). Operators pause between the
+    # prefix and the suffix, so Whisper writes the callsign as two tokens and
+    # the literal matcher — which needs it whole — never sees it. Observed
+    # live: "F4 LVF" for F4LVF produced nothing at all, because "f4" mapped
+    # to nothing and the run broke there.
+    #
+    # Loose, so it still needs corroboration from the gate: this shape also
+    # covers things said constantly on air that are not callsigns, and the
+    # obvious ones are excluded outright below.
+    if PREFIX_TOKEN_RE.match(token) and token.upper() not in ALNUM_NON_CALLSIGN:
+        return token.upper(), False
     return None
 
 
@@ -287,6 +311,29 @@ def _letter_o_as_zero(text: str) -> Optional[str]:
     return shaped[0] if len(shaped) == 1 else None
 
 
+def _mapping_with_spelled(token: str, is_spelled: bool) -> Optional[Tuple[str, bool]]:
+    """
+    Map a token, taking into account whether Whisper capitalised it.
+
+    Shared by the run builder and the evidence count so the two can never
+    disagree about what a token contributed — they previously each derived
+    this independently, and the evidence side missed the capitalisation
+    upgrade, so a run assembled from a capitalised blob was then scored as
+    though the blob were loose and fell below the gate it had just passed
+    ("F4 LVF" -> F4LVF scored 3.33 against a threshold of 4).
+    """
+    mapping = _token_mapping(token)
+    if not is_spelled:
+        return mapping
+    # Capitals are a deliberate signal that these are spelled letters. The
+    # blob rules return the token's own letters and come back loose, which
+    # would otherwise shadow that; a real phonetic word maps to a single
+    # character ("echo" -> "E") and is left alone.
+    if mapping is None or mapping[0] == token.upper():
+        return token.upper(), True
+    return mapping
+
+
 def _run_evidence(
     tokens: List[str], spelled_offsets: Optional[Set[int]] = None
 ) -> Tuple[int, int]:
@@ -303,10 +350,8 @@ def _run_evidence(
     strict_chars = 0
     loose_chars = 0
     for idx, token in enumerate(tokens):
-        mapping = _token_mapping(token)
+        mapping = _mapping_with_spelled(token, idx in spelled_offsets)
         if mapping is None:
-            if idx in spelled_offsets:
-                strict_chars += len(token)
             continue
         chars, is_strict = mapping
         if is_strict:
@@ -553,16 +598,7 @@ def extract_phonetic(
     spelled = spelled or set()
 
     def mapping_at(idx: int):
-        m = _token_mapping(tokens[idx])
-        if m is None and idx in spelled:
-            # Strict, not loose: Whisper capitalising a letter group that is
-            # not a known on-air abbreviation is a deliberate signal that it
-            # heard letters spelled, not a word. Counting it loose leaves
-            # genuine callsigns short of the gate — "Mike 0 ABG" scores only
-            # 3.33 as all-loose because "mike" is itself an ambiguous
-            # first-name mapping, so M0ABG was being dropped.
-            return tokens[idx].upper(), True
-        return m
+        return _mapping_with_spelled(tokens[idx], idx in spelled)
 
     candidates: List[Candidate] = []
     i = 0
@@ -609,9 +645,13 @@ def extract_phonetic(
         # overall preference (tried in the outer loop) since a leading stray
         # word was the original, more common failure mode this trimming was
         # built for.
-        max_offset = min(3, max(0, len(chars) - 3))
-        for offset in range(0, max_offset + 1):
-            max_right_trim = min(2, max(0, len(chars) - offset - 3))
+        # Bounds are in ELEMENTS, and an element can carry several characters
+        # ("F4", "LVF", "30"), so they cannot assume one character each — a
+        # seven-element run spelling "4LVF30F4LVF" needs to start at element
+        # five to reach the F4LVF at the end. The length check below does the
+        # real filtering.
+        for offset in range(0, len(chars)):
+            max_right_trim = min(2, max(0, len(chars) - offset - 1))
             for right_trim in range(0, max_right_trim + 1):
                 end = len(chars) - right_trim
                 text = "".join(chars[offset:end])
