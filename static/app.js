@@ -96,6 +96,29 @@
     return d.innerHTML;
   }
 
+  // esc() is only safe for text content: innerHTML leaves quotes alone, so a
+  // value interpolated into an attribute needs them handled too or a QRZ name
+  // containing a double quote breaks out of it.
+  function escAttr(s) {
+    return esc(s).replace(/"/g, "&quot;");
+  }
+
+  // QRZ names run from a first name to a full legal name to a club-station
+  // description, and a long one stretches the column until the rest of the
+  // table is pushed off screen. Truncated rather than wrapped so every row
+  // stays one line high, with the full value on hover — and only then, so
+  // short names do not carry a pointless tooltip.
+  const NAME_MAX_CHARS = 25;
+
+  function nameCell(value) {
+    const s = value == null ? "" : String(value);
+    if (s.length <= NAME_MAX_CHARS) return `<td class="name">${esc(s)}</td>`;
+    return (
+      `<td class="name" title="${escAttr(s)}">` +
+      `${esc(s.slice(0, NAME_MAX_CHARS))}…</td>`
+    );
+  }
+
   // -- Per-worker panels -----------------------------------------------------
 
   // Each scanning worker is an independent session on its own frequency, so
@@ -547,7 +570,7 @@
           `<tr><td class="call">${star}${esc(d.normalised)}</td>` +
           `<td>${esc(d.band)}</td><td>${fmtFreq(d.frequency)}</td>` +
           `<td>${esc((d.mode || "").toUpperCase())}</td>` +
-          `<td class="name">${esc(d.name || "")}</td>` +
+          nameCell(d.name) +
           `<td class="name">${esc(d.country || "")}</td>` +
           `<td>${fmtTime(d.first_seen)}</td><td>${fmtTime(d.timestamp)}</td>` +
           `<td>${d.hit_count ?? 1}</td><td>${spotted}</td></tr>`
