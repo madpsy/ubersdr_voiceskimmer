@@ -961,6 +961,7 @@ class CallsignScanner:
                     detection.normalised, detection.frequency, comment,
                     self.spot_throttle.bucket_freq(detection.frequency),
                     detection.band, detection.country_code, detection.country,
+                    detection.mode,
                 )
 
     def _build_detection(

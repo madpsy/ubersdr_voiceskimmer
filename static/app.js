@@ -27,6 +27,8 @@
     explainClose: document.getElementById("explain-close"),
     confirmedFilter: document.getElementById("confirmed-filter"),
     spotsFilter: document.getElementById("spots-filter"),
+    confirmedStop: document.getElementById("confirmed-stop"),
+    spotsStop: document.getElementById("spots-stop"),
   };
 
   // Client-side copies, keyed the same way the server keeps them, so each
@@ -658,6 +660,107 @@
     map.setView([lat, lon], 3);
   }
 
+  // -- Row preview audio ----------------------------------------------------
+
+  // Clicking a confirmed callsign or a submitted spot tunes a preview to that
+  // frequency and plays it. This is NOT the transcript Listen button: that
+  // relays what a scanning worker is hearing right now, wherever it happens to
+  // be sitting. This opens a separate short-lived receiver session on the
+  // frequency the callsign was heard on, which may be nothing at all by now.
+  //
+  // Uses MinimalRadio from the main instance (vendored into static/). It
+  // builds its WebSocket from window.location.host, so the preview only works
+  // when the dashboard is same-origin with UberSDR — i.e. reached through the
+  // addon proxy, the same condition /api/description already has.
+
+  let radio = null;          // created on first use; sessions are not free
+  let playingKey = null;     // key of the row currently previewing
+
+  function radioAvailable() {
+    return typeof MinimalRadio !== "undefined";
+  }
+
+  function paintRowAudio() {
+    for (const body of [els.confirmedBody, els.spotsBody]) {
+      if (!body) continue;
+      for (const tr of body.querySelectorAll("tr")) {
+        tr.classList.toggle("playing", !!playingKey && tr.dataset.key === playingKey);
+      }
+    }
+    for (const btn of [els.confirmedStop, els.spotsStop]) {
+      if (!btn) continue;
+      btn.disabled = !playingKey;
+      btn.classList.toggle("on", !!playingKey);
+    }
+  }
+
+  function stopRowAudio() {
+    playingKey = null;
+    if (radio) {
+      // Best effort: a failure here must not leave the buttons stuck on.
+      Promise.resolve(radio.stopPreview()).catch(() => {});
+    }
+    paintRowAudio();
+  }
+
+  function startRowAudio(row) {
+    if (!radioAvailable() || !row || !row.freq) return;
+
+    // One audio stream at a time. The transcript panels relay a scanner
+    // session; this opens its own. Two at once would be unlistenable and
+    // would hold a receiver slot for no reason.
+    for (const p of panels.values()) {
+      if (p.listening) stopListening(p);
+    }
+
+    // Clicking the row that is already playing stops it.
+    if (playingKey === row.key) {
+      stopRowAudio();
+      return;
+    }
+
+    const mode = (row.mode || "").toLowerCase() ||
+                 (row.freq < 10000000 ? "lsb" : "usb");
+    const wasPlaying = !!playingKey;
+    playingKey = row.key;
+    paintRowAudio();
+
+    try {
+      if (!radio) radio = new MinimalRadio();
+      if (wasPlaying && radio.isPlaying) {
+        // Retune the open session rather than tearing it down and building
+        // another — the reconnect is audible and costs a fresh /connection.
+        radio.changeFrequency(row.freq, mode);
+      } else {
+        Promise.resolve(radio.startPreview(row.freq, mode)).catch((err) => {
+          console.error("preview failed", err);
+          stopRowAudio();
+        });
+      }
+    } catch (err) {
+      console.error("preview failed", err);
+      stopRowAudio();
+    }
+  }
+
+  // Delegated: both tables are rewritten wholesale on every redraw.
+  function wireRowClicks(body) {
+    if (!body) return;
+    body.addEventListener("click", (e) => {
+      const tr = e.target.closest("tr");
+      if (!tr || !tr.dataset.freq) return;
+      startRowAudio({
+        key: tr.dataset.key,
+        freq: parseInt(tr.dataset.freq, 10),
+        mode: tr.dataset.mode,
+      });
+    });
+  }
+  wireRowClicks(els.confirmedBody);
+  wireRowClicks(els.spotsBody);
+  if (els.confirmedStop) els.confirmedStop.addEventListener("click", stopRowAudio);
+  if (els.spotsStop) els.spotsStop.addEventListener("click", stopRowAudio);
+
   // -- Explain modal --------------------------------------------------------
 
   // Why a given transcript line did or did not produce a callsign. The
@@ -875,7 +978,8 @@
           spotted = '<span class="badge spotted">spotted</span>';
         }
         return (
-          `<tr class="${bandClass(d.band)}">` +
+          `<tr class="${bandClass(d.band)}" data-key="${escAttr(d.key)}"` +
+          ` data-freq="${d.frequency}" data-mode="${escAttr(d.mode || "")}">` +
           `<td class="call">${star}${flagHTML(d.country_code, d.country)}` +
           `${esc(d.normalised)}</td>` +
           `<td>${esc(d.band)}</td><td>${fmtFreq(d.frequency)}</td>` +
@@ -929,7 +1033,8 @@
     els.spotsBody.innerHTML = rows
       .map(
         (s) =>
-          `<tr class="${bandClass(s.band)}">` +
+          `<tr class="${bandClass(s.band)}" data-key="${escAttr(s.key)}"` +
+          ` data-freq="${s.freq}" data-mode="${escAttr(s.mode || "")}">` +
           `<td>${fmtTime(s.time)}</td>` +
           `<td class="call">${flagHTML(s.country_code, s.country)}` +
           `${esc(s.callsign)}</td>` +
@@ -985,6 +1090,8 @@
       for (const other of panels.values()) {
         if (other !== p && other.listening) stopListening(other);
       }
+      // The other half of the exclusivity — see startRowAudio.
+      if (playingKey) stopRowAudio();
     }
 
     p.listening = on;

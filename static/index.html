@@ -212,6 +212,41 @@
   }
   .panel-filter.active { border-color: var(--star); }
 
+  /* -- Row preview -------------------------------------------------------
+     Both tables share one preview stream, so either Stop button ends it and
+     both are enabled together — there is only ever one thing to stop. */
+  .panel-stop {
+    flex: 0 0 auto;
+    background: #21262d;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text);
+    font: inherit;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    padding: 3px 7px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .panel-stop:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+  .panel-stop:disabled { opacity: .35; cursor: default; }
+  .panel-stop.on { background: #3a1518; border-color: var(--bad); color: var(--bad); }
+
+  #confirmed-table tbody tr, #spots-table tbody tr { cursor: pointer; }
+  /* Beats the band tint and the hover rule, which both target the row. */
+  #confirmed-table tbody tr.playing,
+  #spots-table tbody tr.playing,
+  #confirmed-table tbody tr.playing:hover,
+  #spots-table tbody tr.playing:hover {
+    background: #113a1e;
+    box-shadow: inset 2px 0 0 var(--good);
+  }
+  tbody tr.playing .call::after {
+    content: " ♪";
+    color: var(--good);
+  }
+
   /* -- Collapse ----------------------------------------------------------
      Everything in a panel except its heading hides, so this needs no
      per-panel rule — a transcript body, a map, a table and the map's note
@@ -621,6 +656,7 @@
       <span>Confirmed callsigns</span>
       <input class="panel-filter" id="confirmed-filter" type="search"
              placeholder="filter call / freq / name" aria-label="Filter confirmed callsigns">
+      <button class="panel-stop" id="confirmed-stop" title="Stop preview audio" disabled>&#x25A0; Stop</button>
     </h2>
     <div class="scroll">
       <table id="confirmed-table">
@@ -639,6 +675,7 @@
       <span>Recent DX spots submitted</span>
       <input class="panel-filter" id="spots-filter" type="search"
              placeholder="filter call / freq / name" aria-label="Filter DX spots">
+      <button class="panel-stop" id="spots-stop" title="Stop preview audio" disabled>&#x25A0; Stop</button>
     </h2>
     <div class="scroll">
       <table id="spots-table">
@@ -675,6 +712,13 @@
   </div>
 </div>
 
+<!-- Vendored from the main UberSDR instance so the browser fetches them from
+     this addon rather than depending on the parent's paths resolving. The
+     preview itself still needs the dashboard to be same-origin with UberSDR
+     (MinimalRadio builds its WebSocket from window.location.host), i.e.
+     reached through the addon proxy. -->
+<script src="static/opus-decoder.min.js"></script>
+<script src="static/minimal-radio.js"></script>
 <script src="static/leaflet.js"></script>
 <script src="static/app.js"></script>
 </body>

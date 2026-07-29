@@ -885,6 +885,7 @@ class WebUI:
     def push_spot(
         self, callsign: str, freq: int, comment: str, freq_bucket: int,
         band: str = "", country_code: str = "", country: str = "",
+        mode: str = "",
     ) -> None:
         # Band and country travel with the spot rather than being worked out
         # in the browser. The server already resolved both, and the frontend's
@@ -896,7 +897,7 @@ class WebUI:
         key = f"{callsign}|{freq_bucket}"
         entry = {
             "time": time.time(), "callsign": callsign, "band": band,
-            "country_code": country_code, "country": country,
+            "country_code": country_code, "country": country, "mode": mode,
             "freq": freq, "comment": comment, "key": key,
         }
         with self._lock:

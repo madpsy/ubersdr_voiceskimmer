@@ -104,14 +104,27 @@ class El {
   querySelector() {
     return new El("tbody");
   }
-  querySelectorAll() {
-    return [];
+  querySelectorAll(sel) {
+    if (sel !== "tr") return [];
+    if (this._rowsFor === this._html) return this._rows;
+    const out = [];
+    const re = /<tr[^>]*?data-key="([^"]*)"[^>]*?data-freq="(\d+)"[^>]*?data-mode="([^"]*)"/g;
+    let m;
+    while ((m = re.exec(this._html))) {
+      const e = new El("tr");
+      e.dataset.key = m[1]; e.dataset.freq = m[2]; e.dataset.mode = m[3];
+      e.parentNode = this;
+      out.push(e);
+    }
+    this._rows = out; this._rowsFor = this._html;
+    return out;
   }
   closest(sel) {
+    const byTag = !sel.startsWith(".");
     const want = sel.replace(/^\./, "");
     let n = this;
     while (n) {
-      if (n._classes.has(want)) return n;
+      if (byTag ? n.tagName === want.toUpperCase() : n._classes.has(want)) return n;
       n = n.parentNode;
     }
     return null;
@@ -120,6 +133,7 @@ class El {
   removeAttribute() {}
   load() {}
   pause() {}
+  play() { return Promise.resolve(); }
 }
 
 const byId = Object.create(null);
@@ -127,6 +141,7 @@ const ID_LIST = [
   "uptime", "stats", "transcripts", "receiver", "explain-backdrop",
   "explain-body", "explain-close", "confirmed-filter", "spots-filter",
   "map", "map-note", "layer-confirmed", "layer-spotted",
+  "confirmed-stop", "spots-stop",
 ];
 for (const id of ID_LIST) byId[id] = new El("div");
 byId["layer-confirmed"].checked = true;
@@ -168,6 +183,16 @@ global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 // from whatever the test feeds it directly.
 global.fetch = () => new Promise(() => {});
 
+// MinimalRadio stand-in: records calls so the preview wiring can be asserted
+// without a WebSocket or an AudioContext.
+global.__radioCalls = [];
+global.MinimalRadio = class {
+  constructor() { this.isPlaying = false; global.__radioCalls.push(["new"]); }
+  startPreview(f, m) { this.isPlaying = true; global.__radioCalls.push(["start", f, m]); return Promise.resolve(); }
+  changeFrequency(f, m) { global.__radioCalls.push(["tune", f, m]); }
+  stopPreview() { this.isPlaying = false; global.__radioCalls.push(["stop"]); return Promise.resolve(); }
+};
+
 // Leaflet is absent here on purpose — initMap must degrade cleanly when the
 // library did not load rather than taking the whole dashboard down with it.
 
@@ -184,7 +209,7 @@ const HOOK =
   "\n  globalThis.__test = { applyState, renderConfirmedRow, renderSpotRow," +
   " renderTargets, appendTranscript, setLiveTranscript, redrawConfirmed," +
   " redrawSpots, bandClass, mapStations, tooltipHTML, countryFlag," +
-  " flagHTML, panels, els };\n})();\n";
+  " flagHTML, panels, els, startRowAudio, stopRowAudio };\n})();\n";
 const patched = src.replace(/\n\}\)\(\);\s*$/, HOOK);
 assert.notStrictEqual(patched, src, "could not find the IIFE close in app.js");
 
@@ -375,6 +400,63 @@ check("a click elsewhere does not collapse anything", () => {
   sec.appendChild(notAToggle);
   global.__fireDocument("click", { target: notAToggle });
   assert.ok(!sec.classList.contains("collapsed"));
+});
+
+check("clicking a table row previews that frequency and mode", () => {
+  global.__radioCalls.length = 0;
+  const rows = T.els.confirmedBody.querySelectorAll("tr");
+  assert.ok(rows.length, "no rows carrying data-freq");
+  T.els.confirmedBody.fire("click", { target: rows[0] });
+  const start = global.__radioCalls.find((c) => c[0] === "start");
+  assert.ok(start, `no startPreview: ${JSON.stringify(global.__radioCalls)}`);
+  assert.strictEqual(start[1], 14226000);
+  assert.strictEqual(start[2], "usb", "should use the recorded mode");
+});
+
+check("the Stop button in the title bar ends it", () => {
+  global.__radioCalls.length = 0;
+  assert.strictEqual(byId["confirmed-stop"].disabled, false, "Stop not enabled while playing");
+  byId["confirmed-stop"].fire("click");
+  assert.ok(global.__radioCalls.some((c) => c[0] === "stop"), "no stopPreview");
+  assert.strictEqual(byId["confirmed-stop"].disabled, true, "Stop still enabled when idle");
+});
+
+check("either table's Stop ends the shared stream", () => {
+  const rows = T.els.spotsBody.querySelectorAll("tr");
+  assert.ok(rows.length, "no spot rows carrying data-freq");
+  T.els.spotsBody.fire("click", { target: rows[0] });
+  assert.strictEqual(byId["confirmed-stop"].disabled, false,
+                     "the other table's Stop should also arm");
+  global.__radioCalls.length = 0;
+  byId["spots-stop"].fire("click");
+  assert.ok(global.__radioCalls.some((c) => c[0] === "stop"));
+});
+
+check("row preview and transcript listening are mutually exclusive", () => {
+  const p = T.panels.get(0);
+  assert.ok(p, "panel 0 missing");
+
+  // Transcript first, then a row: the transcript must be stopped.
+  p.listening = true;
+  const rows = T.els.confirmedBody.querySelectorAll("tr");
+  T.els.confirmedBody.fire("click", { target: rows[0] });
+  assert.strictEqual(p.listening, false, "row preview did not stop the transcript");
+
+  // Row first, then the transcript: the row preview must be stopped.
+  global.__radioCalls.length = 0;
+  p.listen.fire("click");                       // toggles listening on
+  assert.ok(global.__radioCalls.some((c) => c[0] === "stop"),
+            "listening did not stop the row preview");
+  assert.strictEqual(byId["confirmed-stop"].disabled, true);
+});
+
+check("clicking the playing row again stops it", () => {
+  global.__radioCalls.length = 0;
+  const rows = T.els.confirmedBody.querySelectorAll("tr");
+  T.els.confirmedBody.fire("click", { target: rows[0] });   // start
+  T.els.confirmedBody.fire("click", { target: rows[0] });   // same row -> stop
+  assert.ok(global.__radioCalls.some((c) => c[0] === "stop"));
+  assert.strictEqual(byId["confirmed-stop"].disabled, true);
 });
 
 check("clicking a transcript line asks for an explanation", () => {
