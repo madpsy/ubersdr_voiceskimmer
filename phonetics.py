@@ -83,6 +83,7 @@ LOOSE_LETTERS: Dict[str, str] = {
     "germany": "G", "george": "G", "guatemala": "G", "greece": "G",
     "glasgow": "G", "gibraltar": "G", "golf!": "G",
     "gulf": "G",  # common ASR mishearing of "Golf" (observed live)
+    "golfer": "G",  # ditto, when the next word runs into it (observed live)
     "henry": "H", "honolulu": "H", "havana": "H", "holland": "H",
     "harry": "H", "houston": "H", "hotel!": "H",
     "italy": "I", "india!": "I", "item": "I", "ireland": "I",
@@ -208,9 +209,15 @@ FULL_MAP = {**LOOSE_MAP, **STRICT_MAP}  # strict wins on collision
 _VOWELS = set("aeiouy")  # y counted so "by", "my", "sky", "gym" don't qualify
 
 
-# A bare callsign prefix: one or two letters then one or two digits.
-# Deliberately does not match digits-first forms ("40s", "20m", "73").
-PREFIX_TOKEN_RE = re.compile(r"^[a-z]{1,2}[0-9]{1,2}$")
+# A bare callsign prefix, in the two shapes CALLSIGN_RE allows before the
+# separating digit: one or two letters ("G4", "MM3"), or a digit and a letter
+# ("2E1", "9A1", "3D2"). The second form matters for the UK's 2E0/2E1 series
+# and every other digit-first prefix — without it "All the best, 2E1, G.A.F."
+# broke at the prefix and yielded nothing rather than 2E1GAF (observed live).
+#
+# Still deliberately does not match digit-digit-letter ("40s", "20m") or bare
+# numbers ("73"), which is what band and sign-off references look like.
+PREFIX_TOKEN_RE = re.compile(r"^(?:[a-z]{1,2}|[0-9][a-z])[0-9]{1,2}$")
 
 # A phonetic word with its digit run together: "kilo4", "golf8".
 WORD_DIGIT_RE = re.compile(r"^([a-z]+)([0-9]+)$")
@@ -292,6 +299,19 @@ def _token_mapping(token: str) -> Optional[Tuple[str, bool]]:
 # followed-by-something-mappable rule applies — "number" alone never starts
 # or extends a run.
 CONNECTOR_WORDS = {"and", "uh", "um", "er", "ah", "number"}
+
+# Bare English function words that happen to map to a single character. They
+# are fine INSIDE a run — "G. A. F." really is spelling out an A — but must
+# not START one. Observed live: "A Gulf Zero, Victor, Italy, Mike" is G0VIM
+# with an article in front, and beginning the run at "a" gives AG0VIM, which
+# is just as callsign-shaped and so wins the trim loop outright. Trimming
+# cannot rescue it because both readings are structurally valid; the only way
+# to tell them apart is that these words are overwhelmingly themselves.
+#
+# Only suppressed when a spoken phonetic WORD follows. If the next token is
+# another bare letter or digit we are already inside a spelled-out callsign
+# ("I. K. 1. M. N. F.") and the leading character is genuine.
+WEAK_RUN_STARTERS = {"a", "i", "o", "oh"}
 
 
 def _letter_o_as_zero(text: str) -> Optional[str]:
@@ -575,16 +595,33 @@ def _spelled_positions_from(cased: List[str]) -> Set[int]:
     caps and ordinary words in lower. Sentence-initial words are title case,
     not all-caps, so they do not qualify. Known on-air abbreviations are
     excluded outright.
+
+    A prefix Whisper wrote with its digit attached ("GW4", "2E1", "M0")
+    counts too. Those already map via PREFIX_TOKEN_RE, but only loosely, and
+    a run made of one prefix plus a three-letter suffix is then all-loose and
+    scores 0.30 — under the default 0.4 extract threshold, so "GW4 F-O-I"
+    and "2E1, G.A.F." were found and then discarded. Capitals say the
+    operator spelled it rather than the recogniser hearing a word, which is
+    the same evidence an all-caps suffix carries.
     """
     positions: Set[int] = set()
     for i, tok in enumerate(cased):
-        if (
-            2 <= len(tok) <= 4
-            and tok.isalpha()
-            and tok.isupper()
-            and tok not in CAPS_NON_CALLSIGN
-        ):
+        if not (2 <= len(tok) <= 4 and tok.isupper()):
+            continue
+        if tok in CAPS_NON_CALLSIGN or tok in ALNUM_NON_CALLSIGN:
+            continue
+        if tok.isalpha():
             positions.add(i)
+            continue
+        # Mixed letters and digits: only when the prefix rules already
+        # recognise the shape. Band and power references are the same
+        # length and equally likely to be capitalised ("40M", "100W", "5W"),
+        # and they map to nothing — deferring to _token_mapping keeps them
+        # out without needing a second exclusion list to maintain.
+        if tok.isalnum() and any(c.isdigit() for c in tok):
+            mapping = _token_mapping(tok.lower())
+            if mapping is not None and mapping[0] == tok:
+                positions.add(i)
     return positions
 
 
@@ -615,10 +652,23 @@ def extract_phonetic(
     def mapping_at(idx: int):
         return _mapping_with_spelled(tokens[idx], idx in spelled)
 
+    def weak_starter(idx: int) -> bool:
+        """A bare function word that must not begin a run — see
+        WEAK_RUN_STARTERS."""
+        if tokens[idx] not in WEAK_RUN_STARTERS or idx in spelled:
+            return False
+        nxt = idx + 1
+        return (
+            nxt < len(tokens)
+            and len(tokens[nxt]) > 1
+            and tokens[nxt].isalpha()
+            and mapping_at(nxt) is not None
+        )
+
     candidates: List[Candidate] = []
     i = 0
     while i < len(tokens):
-        if mapping_at(i) is None:
+        if mapping_at(i) is None or weak_starter(i):
             i += 1
             continue
 
@@ -763,6 +813,29 @@ def extract_literal(text: str, tokens: List[str], cues: Set[int]) -> List[Candid
     return candidates
 
 
+# "stroke"/"slash" announce a suffix on the callsign just given, so whatever
+# follows is an appendage to it and never a callsign in its own right — see
+# _truncate_at_stroke.
+_STROKE_RE = re.compile(r"\b(?:stroke|slash)\b", re.IGNORECASE)
+
+
+def _truncate_at_stroke(text: str) -> str:
+    """
+    Drop everything after the first spoken "stroke"/"slash".
+
+    What follows is the suffix of the callsign just spelled ("...November
+    Foxtrot stroke, Italy Alpha 5"), and reading it as callsign material only
+    ever manufactures a second, wrong callsign out of the appendage. The
+    suffix itself is already captured separately via SUFFIX_WORDS, so the
+    stroke token is kept and only the tail is cut.
+
+    Not applied to "portable"/"mobile", which end a callsign but are ordinary
+    sign-offs with real speech after them.
+    """
+    match = _STROKE_RE.search(text)
+    return text if match is None else text[:match.end()]
+
+
 def extract_callsigns(text: str) -> List[Candidate]:
     """
     Extract candidate callsigns from one transcript segment.
@@ -774,6 +847,7 @@ def extract_callsigns(text: str) -> List[Candidate]:
     if not text or not text.strip():
         return []
 
+    text = _truncate_at_stroke(text)
     tokens = tokenise(text)
     if not tokens:
         return []

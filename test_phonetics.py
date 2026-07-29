@@ -26,6 +26,20 @@ def calls(text):
     return [c.callsign for c in extract_callsigns(text)]
 
 
+# scanner.py's --min-extract-confidence default. Extraction alone is not
+# enough for a callsign to reach QRZ — several live misses were candidates
+# that WERE assembled correctly and then discarded for scoring under this,
+# which `calls()` cannot see. Tests for those must assert against the
+# threshold or they pass while the scanner still drops the callsign.
+DEFAULT_MIN_CONFIDENCE = 0.4
+
+
+def confident_calls(text, threshold=DEFAULT_MIN_CONFIDENCE):
+    return [
+        c.callsign for c in extract_callsigns(text) if c.confidence >= threshold
+    ]
+
+
 class TestCallsignShape(unittest.TestCase):
     def test_accepts_real_formats(self):
         for call in [
@@ -550,6 +564,174 @@ class TestLetterOHeardAsZero(unittest.TestCase):
     def test_no_o_or_already_has_digit(self):
         self.assertIsNone(_letter_o_as_zero("ABCDE"))
         self.assertIsNone(_letter_o_as_zero("M0ABC"))
+
+
+class TestCapitalisedPrefixIsSpelledEvidence(unittest.TestCase):
+    """
+    A prefix Whisper wrote with its digit attached ("GW4", "2E1") already
+    mapped, but only loosely. Paired with a three-letter suffix the whole run
+    was then all-loose and scored exactly 0.30 — under the default 0.4
+    extract threshold, so the callsign was assembled correctly and thrown
+    away. Observed live for GW4FOI and 2E1GAF.
+
+    Capitals are the same evidence an all-caps suffix carries, so these
+    assert against the threshold rather than merely that a candidate exists.
+    """
+
+    def test_caps_prefix_survives_the_confidence_threshold(self):
+        self.assertIn("GW4FOI", confident_calls("GW4 F-O-I"))
+        self.assertIn("2E1GAF", confident_calls("All the best, 2E1, G.A.F."))
+
+    def test_band_and_power_references_are_not_spelled_evidence(self):
+        # Same length and equally likely to be capitalised, but they map to
+        # nothing, which is what keeps them out.
+        for text in [
+            "Running 100W into a dipole on 40M here.",
+            "I was on 20M earlier, now 80M, S9 signals.",
+            "Working FT8 and JS8 on 15M with 5W.",
+            "That's a 599 report, 73 and good DX.",
+        ]:
+            self.assertEqual(calls(text), [], text)
+
+    def test_lowercase_prefix_is_not_upgraded(self):
+        # Without the capitals there is no spelling signal, so the run stays
+        # loose and scores below the threshold exactly as before.
+        self.assertNotIn("GW4FOI", confident_calls("gw4 f-o-i"))
+
+
+class TestDigitFirstPrefix(unittest.TestCase):
+    """
+    PREFIX_TOKEN_RE only matched letters-then-digits, so the UK 2E0/2E1
+    series and every other digit-first prefix broke the run at exactly the
+    point the callsign started. Observed live: "All the best, 2E1, G.A.F."
+    yielded nothing rather than 2E1GAF.
+    """
+
+    def test_digit_first_prefixes_map(self):
+        self.assertIn("2E1GAF", confident_calls("All the best, 2E1, G.A.F."))
+        self.assertIn("2E0ABC", confident_calls("This is 2E0 Alpha Bravo Charlie"))
+        self.assertIn("9A1ABC", confident_calls("This is 9A1 Alpha Bravo Charlie"))
+
+    def test_band_shapes_still_excluded(self):
+        # Digit-digit-letter, which is what band references look like, is
+        # deliberately still unmatched.
+        for text in ["calling on 40s tonight", "up on 20m and 80m"]:
+            self.assertEqual(calls(text), [], text)
+
+
+class TestArticleDoesNotStartARun(unittest.TestCase):
+    """
+    The bare article "a" maps to A, so "A Gulf Zero, Victor, Italy, Mike"
+    assembled as AG0VIM — which is just as callsign-shaped as the real
+    G0VIM, so the trim loop had no reason to prefer the right one. Observed
+    live; the wrong callsign then went to QRZ.
+    """
+
+    def test_leading_article_is_not_absorbed(self):
+        text = "A Gulf Zero, Victor, Italy, Mike in the southeast of England, Roger."
+        got = confident_calls(text)
+        self.assertIn("G0VIM", got)
+        self.assertNotIn("AG0VIM", got)
+
+    def test_other_bare_function_words_too(self):
+        for text, want, wrong in [
+            ("Oh, Mike Zero Alpha Bravo Charlie", "M0ABC", "0M0ABC"),
+            ("I Golf Four Romeo Sugar calling", "G4RS", "IG4RS"),
+        ]:
+            got = calls(text)
+            self.assertIn(want, got, text)
+            self.assertNotIn(wrong, got, text)
+
+    def test_still_allowed_inside_a_run(self):
+        # "G. A. F." really is spelling out an A — only STARTING a run is
+        # suppressed, and only then when a spoken word follows.
+        self.assertIn("2E1GAF", confident_calls("All the best, 2E1, G.A.F."))
+
+    def test_still_allowed_when_another_bare_letter_follows(self):
+        # Already inside a spelled-out callsign, so the leading letter is
+        # genuine rather than an article.
+        self.assertIn("AB1CD", confident_calls("This is A-B-1-C-D calling CQ"))
+
+    def test_phonetic_words_for_the_same_letters_are_unaffected(self):
+        for text, want in [
+            ("Alpha Bravo 1 Charlie Delta", "AB1CD"),
+            ("India Kilo 1 Mike November Foxtrot", "IK1MNF"),
+            ("Oscar Echo 1 Alpha Bravo", "OE1AB"),
+        ]:
+            self.assertIn(want, confident_calls(text), text)
+
+
+class TestStrokeTruncatesTheSegment(unittest.TestCase):
+    """
+    "Stroke"/"slash" announce a suffix on the callsign just given, so what
+    follows is an appendage to it and never a callsign in its own right.
+    Reading it as callsign material only manufactures a second, wrong
+    callsign — observed live: "India Kilo-1, Mike, November Foxtrot stroke,
+    Italy Alpha 5".
+    """
+
+    def test_callsign_before_the_stroke_is_still_found(self):
+        text = "This is India Kilo-1, Mike, November Foxtrot stroke, Italy Alpha 5."
+        self.assertIn("IK1MNF", confident_calls(text))
+
+    def test_nothing_is_extracted_from_the_tail(self):
+        text = (
+            "This is Mike Zero Alpha Bravo stroke "
+            "Golf Four Romeo Sugar Tango"
+        )
+        self.assertEqual(calls(text), ["M0AB"])
+
+    def test_spoken_suffix_still_attaches(self):
+        cands = {
+            c.callsign: c
+            for c in extract_callsigns("Golf Four Alpha Bravo slash Papa")
+        }
+        self.assertEqual(cands["G4AB"].suffix, "/")
+
+    def test_portable_and_mobile_do_not_truncate(self):
+        # They end a callsign but are ordinary sign-offs with real speech
+        # after them, so a second station in the same segment survives.
+        text = (
+            "Mike Zero Alpha Bravo Charlie portable, "
+            "and this is Golf Four Romeo Sugar"
+        )
+        got = calls(text)
+        self.assertIn("M0ABC", got)
+        self.assertIn("G4RS", got)
+
+
+class TestLiveMissRegressions(unittest.TestCase):
+    """
+    Whole segments quoted verbatim from live scans that produced no spot.
+    Each one is a different failure, so they are kept together as an
+    end-to-end check that the fixes hold at the threshold the scanner
+    actually applies.
+    """
+
+    CASES = [
+        ("GW4 F-O-I", "GW4FOI"),
+        (
+            "A Gulf Zero, Victor, Italy, Mike in the southeast of England, Roger.",
+            "G0VIM",
+        ),
+        ("Charlie Tango 2, golfer Julia Zulu.", "CT2GJZ"),
+        (
+            "This is India Kilo-1, Mike, November Foxtrot stroke, Italy Alpha 5.",
+            "IK1MNF",
+        ),
+        ("All the best, 2E1, G.A.F.", "2E1GAF"),
+        ("Mike 7 November kilo whiskey", "M7NKW"),
+    ]
+
+    def test_each_segment_yields_its_callsign(self):
+        for text, want in self.CASES:
+            self.assertIn(want, confident_calls(text), text)
+
+    def test_no_spurious_extras(self):
+        # A wrong callsign is worse than a missed one: it costs a lookup and
+        # can be spotted if QRZ happens to hold it.
+        for text, want in self.CASES:
+            self.assertEqual(confident_calls(text), [want], text)
 
 
 if __name__ == "__main__":
