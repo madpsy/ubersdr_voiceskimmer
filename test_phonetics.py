@@ -354,6 +354,22 @@ class TestSplitPrefixCallsigns(unittest.TestCase):
         ]:
             self.assertEqual(calls(text), [], text)
 
+    def test_phonetic_word_glued_to_its_digit(self):
+        # Whisper runs the two together whenever the operator does.
+        # "Kilo4 Golf Radio Oscar" gave nothing rather than K4GRO, because the
+        # joined token matched nothing and the run ended exactly where the
+        # callsign began.
+        self.assertIn("K4GRO", calls("Kilo4 Golf Radio Oscar"))
+        self.assertIn("G8AB", calls("this is Golf8 Alpha Bravo"))
+        self.assertIn("M0ABC", calls("Mike0 Alpha Bravo Charlie"))
+        self.assertIn("DL9K", calls("Delta Lima9 Kilo"))
+
+    def test_glued_form_respects_the_exclusions(self):
+        # These have the same shape but are never callsign material.
+        for text in ["you are S9 here", "running FT8 on 20m",
+                     "my rig is an FT991 model", "I worked 100 stations in 2024"]:
+            self.assertEqual(calls(text), [], text)
+
     def test_capitalised_phonetic_words_are_not_split_into_letters(self):
         # ECHO is four capitals, but it is a phonetic word meaning E — it must
         # not be read as four spelled letters.

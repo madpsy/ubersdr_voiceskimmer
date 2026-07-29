@@ -212,6 +212,9 @@ _VOWELS = set("aeiouy")  # y counted so "by", "my", "sky", "gym" don't qualify
 # Deliberately does not match digits-first forms ("40s", "20m", "73").
 PREFIX_TOKEN_RE = re.compile(r"^[a-z]{1,2}[0-9]{1,2}$")
 
+# A phonetic word with its digit run together: "kilo4", "golf8".
+WORD_DIGIT_RE = re.compile(r"^([a-z]+)([0-9]+)$")
+
 # Same shape, but said constantly on air and never part of a callsign:
 # signal strengths, readability, and the digital mode names.
 ALNUM_NON_CALLSIGN = {
@@ -263,6 +266,18 @@ def _token_mapping(token: str) -> Optional[Tuple[str, bool]]:
     # obvious ones are excluded outright below.
     if PREFIX_TOKEN_RE.match(token) and token.upper() not in ALNUM_NON_CALLSIGN:
         return token.upper(), False
+    # A phonetic word with its digit glued on ("Kilo4", "Golf8"). Whisper does
+    # this whenever the operator runs the two together, and the joined token
+    # matched nothing, so the run ended right at the point the callsign
+    # started — "Kilo4 Golf Radio Oscar" yielded nothing rather than K4GRO.
+    # Keeps the word's own strictness: the digit rides along with it rather
+    # than being independent evidence.
+    glued = WORD_DIGIT_RE.match(token)
+    if glued and token.upper() not in ALNUM_NON_CALLSIGN:
+        word, digits = glued.groups()
+        word_mapping = _token_mapping(word)     # pure letters: cannot recurse here
+        if word_mapping is not None:
+            return word_mapping[0] + digits, word_mapping[1]
     return None
 
 
