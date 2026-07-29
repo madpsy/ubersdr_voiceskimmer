@@ -259,8 +259,10 @@
       })
       .catch(() => {});   // not fatal; the dashboard is fine without it
   }
-  initMap();
-  loadReceiver();
+  // Called from the wiring section at the end of the file, not here: the map
+  // state these touch is declared with `let` further down, and a `let` is in
+  // its temporal dead zone until execution reaches it — calling up here threw
+  // "can't access lexical declaration 'map' before initialization".
 
   // -- Live signal ----------------------------------------------------------
 
@@ -971,6 +973,12 @@
   }
 
   // -- Wiring -----------------------------------------------------------------
+
+  // Everything below runs after every declaration in this file, so nothing
+  // here can hit a temporal dead zone. initMap first: loadReceiver places the
+  // receiver marker once its fetch resolves.
+  initMap();
+  loadReceiver();
 
   fetch("api/state")
     .then((r) => r.json())

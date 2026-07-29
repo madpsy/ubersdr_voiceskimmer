@@ -9,10 +9,14 @@
 #   push   — build multi-platform manifest (amd64 + arm64) via buildx and push
 #   run    — run the image locally (set env vars below)
 #
+# build, arm64 and push all run the test suite first and refuse to build if it
+# fails. See run_tests().
+#
 # Environment variables (build):
 #   IMAGE      Docker image name/tag   (default: madpsy/ubersdr_voiceskimmer:latest)
 #   PLATFORM   Docker --platform flag  (default: linux/amd64)
 #   BUILDER    buildx builder name     (default: ubersdr_voiceskimmer_builder)
+#   SKIP_TESTS Set to 1 to build without running the tests
 
 set -euo pipefail
 
@@ -43,6 +47,41 @@ ensure_builder() {
     fi
 }
 
+# Run the test suite before anything is built or published.
+#
+# Both suites matter and neither subsumes the other. pytest covers extraction,
+# rotation, spotting and the HTTP layer; test_frontend.js loads static/app.js
+# in a stubbed DOM, which is the only thing that catches a dashboard that
+# parses cleanly and then dies on load — a `node --check` passes such a file
+# happily, and one shipped that way (initMap() reading a `let` still in its
+# temporal dead zone took the whole page down).
+#
+# Set SKIP_TESTS=1 to bypass, for when you need an image out and already know.
+run_tests() {
+    if [[ "${SKIP_TESTS:-0}" == "1" ]]; then
+        echo "SKIP_TESTS=1 — skipping tests."
+        return
+    fi
+
+    local py="$SCRIPT_DIR/.venv/bin/python"
+    [[ -x "$py" ]] || py="$(command -v python3 || true)"
+    if [[ -n "$py" ]] && "$py" -c "import pytest" 2>/dev/null; then
+        echo "Running Python tests..."
+        (cd "$SCRIPT_DIR" && "$py" -m pytest -q) \
+            || die "Python tests failed — not building. Set SKIP_TESTS=1 to override."
+    else
+        echo "warning: pytest unavailable, skipping Python tests" >&2
+    fi
+
+    if command -v node >/dev/null; then
+        echo "Running frontend tests..."
+        (cd "$SCRIPT_DIR" && node test_frontend.js) \
+            || die "Frontend tests failed — not building. Set SKIP_TESTS=1 to override."
+    else
+        echo "warning: node not found, skipping frontend tests" >&2
+    fi
+}
+
 stage_context() {
     TMPCTX="$(mktemp -d)"
     # shellcheck disable=SC2064
@@ -61,6 +100,7 @@ stage_context() {
 
 build() {
     check_deps
+    run_tests
     stage_context
 
     echo "Building image $IMAGE (platform=$PLATFORM)..."
@@ -74,6 +114,7 @@ build() {
 
 push() {
     check_deps
+    run_tests
     ensure_builder
     stage_context
 

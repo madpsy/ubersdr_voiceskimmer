@@ -218,12 +218,26 @@ A full roaming scan across every band, with spot submission on:
 ## 6. Tests
 
 ```bash
-.venv/bin/python -m unittest discover -p 'test_*.py'
+.venv/bin/python -m pytest -q     # or: python -m unittest discover -p 'test_*.py'
+node test_frontend.js             # dashboard
 ```
+
+Both run automatically on `./docker.sh build`, `arm64` and `push`, and a
+failure stops the build before an image is produced. `SKIP_TESTS=1` overrides
+it.
 
 The false-positive tests in `test_phonetics.py` matter more than the positive
 ones — a recall improvement that lets ordinary conversation through is a bad
 trade. `test_rotation.py` guards against camping on one frequency.
+`test_web.py` covers the rate limiter and the client-address derivation
+behind the addon proxy.
+
+`test_frontend.js` loads `static/app.js` in a stubbed DOM. That is the only
+check that catches a dashboard which parses cleanly and then dies on load:
+`node --check` passes such a file happily, and one shipped that way once — a
+call placed above a `let` declaration hit its temporal dead zone and took the
+whole page down with `can't access lexical declaration 'map' before
+initialization`.
 
 ## 7. Docker / Deployment
 
