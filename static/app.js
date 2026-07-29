@@ -331,6 +331,17 @@
 
   // -- DX spots submitted ---------------------------------------------------
 
+  // A spot going out also changes the confirmed row's Spotted badge. The
+  // server records that on its own copy, so a page reload showed it
+  // correctly, but the live table kept the pre-spot object and read "no"
+  // until then.
+  function markSpotted(spot) {
+    const d = confirmed.get(spot.callsign);
+    if (!d || d.spotted_at) return;
+    d.spotted_at = spot.time;
+    redrawConfirmed();
+  }
+
   function renderSpotRow(spot) {
     if (els.spotsBody.querySelector(".empty-row")) els.spotsBody.innerHTML = "";
     const row = document.createElement("tr");
@@ -487,7 +498,11 @@
     });
     es.addEventListener("live", (e) => setLiveTranscript(JSON.parse(e.data)));
     es.addEventListener("confirmed", (e) => renderConfirmedRow(JSON.parse(e.data)));
-    es.addEventListener("spot", (e) => renderSpotRow(JSON.parse(e.data)));
+    es.addEventListener("spot", (e) => {
+      const spot = JSON.parse(e.data);
+      renderSpotRow(spot);
+      markSpotted(spot);
+    });
     es.addEventListener("stats", (e) => renderStats(JSON.parse(e.data)));
     es.addEventListener("targets", (e) => renderTargets(JSON.parse(e.data)));
     es.addEventListener("signal", (e) => renderSignal(JSON.parse(e.data)));
