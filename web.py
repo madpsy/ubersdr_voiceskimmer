@@ -38,6 +38,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from flask import Flask, Response, jsonify, request
+
+from phonetics import explain
 from werkzeug.serving import make_server
 
 log = logging.getLogger(__name__)
@@ -161,10 +163,19 @@ class WebUI:
     """In-memory live state + Flask/SSE server for the dashboard."""
 
     def __init__(
-        self, workers: int = 1, transcript_maxlen: int = 300, spots_maxlen: int = 100
+        # transcript_maxlen is PER WORKER — each keeps its own scrollback, so
+        # --parallel 2 holds 2x this. Kept equal to the frontend's own cap so
+        # a reload shows the same history the live view was holding.
+        self, workers: int = 1, transcript_maxlen: int = 200, spots_maxlen: int = 100,
+        gates: Optional[Dict[str, Any]] = None,
     ):
         self._lock = threading.Lock()
         self._start_time = time.time()
+        # The scanner-side thresholds a candidate must clear after extraction.
+        # /api/explain reports them alongside its verdict so the dashboard can
+        # say "extracted but dropped for scoring 0.30" rather than leaving the
+        # user to guess which gate a callsign died at.
+        self.gates: Dict[str, Any] = gates or {}
 
         # Everything a single scanning session owns is keyed by worker id.
         # Confirmed callsigns, spots and stats stay shared — they are results,
@@ -253,6 +264,33 @@ class WebUI:
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
+        @app.route("/api/explain", methods=["POST"])
+        def api_explain():
+            """
+            Why a transcript line did or did not yield a callsign.
+
+            Read-only and side-effect free — extraction is pure string work
+            and no QRZ lookup is made, so this cannot be used to burn the
+            instance's lookup quota. POST rather than GET because a
+            transcript line is arbitrary user-visible text that has no
+            business in a URL or an access log.
+            """
+            payload = request.get_json(silent=True) or {}
+            text = payload.get("text", "")
+            if not isinstance(text, str):
+                return jsonify({"error": "text must be a string"}), 400
+            # Long enough for any real segment; a cap keeps a pathological
+            # request from spending real CPU in the trim loop.
+            if len(text) > 2000:
+                return jsonify({"error": "text too long"}), 413
+
+            result = explain(text)
+            result["gates"] = dict(self.gates)
+            for cand in result["candidates"]:
+                cand["verdict"] = self._verdict(cand)
+            result["summary"] = self._summarise(result)
+            return jsonify(result)
+
         @app.route("/api/audio")
         @app.route("/api/audio/<int:worker>")
         def api_audio(worker: int = 0):
@@ -292,6 +330,75 @@ class WebUI:
             )
 
         return app
+
+    # -- Explanation ------------------------------------------------------
+
+    def _verdict(self, cand: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        What the scanner would do with this candidate, in the order
+        _process() actually applies its gates. Stops at the first failure,
+        because that is the one that matters — reporting every gate a dead
+        candidate would also have failed just buries the real reason.
+        """
+        min_conf = self.gates.get("min_extract_confidence")
+        min_len = self.gates.get("min_callsign_length")
+
+        if min_conf is not None and cand["confidence"] < min_conf:
+            return {
+                "reached_qrz": False, "gate": "min_extract_confidence",
+                "detail": (
+                    f"scored {cand['confidence']:.2f}, needs "
+                    f"{min_conf:.2f} — extracted, then dropped"
+                ),
+            }
+        if min_len is not None and len(cand["normalised"]) < min_len:
+            return {
+                "reached_qrz": False, "gate": "min_callsign_length",
+                "detail": (
+                    f"{len(cand['normalised'])} characters, needs {min_len}"
+                ),
+            }
+        if not cand["lookupable"]:
+            return {
+                "reached_qrz": False, "gate": "shape",
+                "detail": "not a legal callsign once normalised",
+            }
+        return {
+            "reached_qrz": True, "gate": None,
+            "detail": "sent to QRZ — existence decides it from here",
+        }
+
+    @staticmethod
+    def _summarise(result: Dict[str, Any]) -> str:
+        """One plain sentence for the top of the modal."""
+        looked_up = [
+            c for c in result["candidates"] if c["verdict"]["reached_qrz"]
+        ]
+        if looked_up:
+            return "Looked up: " + ", ".join(c["normalised"] for c in looked_up)
+
+        if result["candidates"]:
+            first = result["candidates"][0]
+            return (
+                f"Found {first['callsign']} but did not look it up — "
+                f"{first['verdict']['detail']}"
+            )
+
+        unmapped = [t for t in result["tokens"] if t["maps_to"] is None]
+        if not result["runs"]:
+            if unmapped and len(unmapped) == len(result["tokens"]):
+                return "No word here maps to a letter or digit"
+            return "Nothing callsign-like in this line"
+
+        best = max(result["runs"], key=lambda r: len(r["text"]))
+        if best["outcome"] == "below_evidence":
+            return (
+                f"Assembled {best['text']} but it scored "
+                f"{best['evidence']} against a threshold of {best['threshold']}"
+            )
+        return (
+            f"Assembled {best['text']}, which is not a legal callsign shape"
+        )
 
     @staticmethod
     def _sse(event_type: str, data: Any) -> str:

@@ -23,7 +23,13 @@ actually live.
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# Weighted evidence a run must carry before it can become a candidate: 2
+# points per strict char, 2/3 per loose char, +2 for a cue. Named so the
+# joined-callsign split and the trim loop cannot drift apart, and so the
+# /api/explain endpoint reports the same number the gate actually applies.
+EVIDENCE_THRESHOLD = 4.0
 
 # ---------------------------------------------------------------------------
 # Phonetic vocabulary
@@ -684,7 +690,8 @@ def _cue_positions(tokens: List[str]) -> Set[int]:
 
 
 def extract_phonetic(
-    tokens: List[str], cues: Set[int], spelled: Optional[Set[int]] = None
+    tokens: List[str], cues: Set[int], spelled: Optional[Set[int]] = None,
+    trace: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Candidate]:
     """
     Find runs of phonetic tokens and promote the plausible ones.
@@ -692,6 +699,11 @@ def extract_phonetic(
     `spelled` holds indices Whisper wrote in capitals, i.e. letters it heard
     spelled out rather than words — see _spelled_positions. They map to their
     own letters so a suffix like "ABG" keeps a run going instead of ending it.
+
+    `trace`, when given, collects one record per run describing what was
+    assembled and why it was or was not promoted — see explain(). Recorded
+    inline here rather than reconstructed by a parallel implementation, so
+    the explanation cannot drift from what extraction actually did.
     """
     spelled = spelled or set()
 
@@ -745,6 +757,33 @@ def extract_phonetic(
 
         cued = any(pos in cues for pos in range(start, start + 2))
 
+        record: Optional[Dict[str, Any]] = None
+        if trace is not None:
+            full_strict, full_loose = _run_evidence(
+                tokens[start:i],
+                {p - start for p in spelled if start <= p < i},
+            )
+            record = {
+                "tokens": tokens[start:i],
+                "text": "".join(chars),
+                "cued": cued,
+                "suffix": suffix,
+                "strict_chars": full_strict,
+                "loose_chars": full_loose,
+                "evidence": round(
+                    2 * full_strict + (2 / 3) * full_loose + (2 if cued else 0), 2
+                ),
+                "threshold": EVIDENCE_THRESHOLD,
+                "attempts": [],
+                "accepted": [],
+                # Overwritten below the moment anything is promoted. Staying
+                # at this value means every trim was either the wrong shape
+                # or too short — the commonest reason a real callsign is
+                # missed, and the thing worth saying plainly.
+                "outcome": "no_valid_shape",
+            }
+            trace.append(record)
+
         # Two callsigns given back to back arrive as one unbroken run, and
         # the trim loop below would return a hybrid straddling the join
         # rather than either real callsign. Tried first, and only when the
@@ -759,7 +798,12 @@ def extract_phonetic(
             # and the pieces are only meaningful together — a partition that
             # accounts for every character is itself the evidence that the
             # split is real.
-            if 2 * run_strict + (2 / 3) * run_loose + (2 if cued else 0) >= 4:
+            split_evidence = (
+                2 * run_strict + (2 / 3) * run_loose + (2 if cued else 0)
+            )
+            if record is not None:
+                record["split_into"] = list(joined)
+            if split_evidence >= EVIDENCE_THRESHOLD:
                 confidence = round(
                     min(0.25 + 0.10 * min(run_strict, 4) + (0.25 if cued else 0), 0.95),
                     3,
@@ -779,7 +823,12 @@ def extract_phonetic(
                             suffix=suffix if part_no == len(joined) - 1 else "",
                         )
                     )
+                if record is not None:
+                    record["outcome"] = "split"
+                    record["accepted"] = list(joined)
                 continue
+            if record is not None:
+                record["outcome"] = "split_below_evidence"
 
         # Try the whole run first, then progressively trim from the left
         # and/or right. A run often has a leading stray ("...and four radio
@@ -804,10 +853,19 @@ def extract_phonetic(
                 text = "".join(chars[offset:end])
                 if len(text) < 3 or len(text) > 10:
                     continue
+                rescued = False
                 if not is_callsign_shaped(text):
                     text = _letter_o_as_zero(text)
                     if text is None:
+                        if record is not None:
+                            record["attempts"].append({
+                                "text": "".join(chars[offset:end]),
+                                "shaped": False,
+                                "evidence": None,
+                                "accepted": False,
+                            })
                         continue
+                    rescued = True
 
                 slice_start = start + offset
                 slice_end = i - right_trim
@@ -826,7 +884,17 @@ def extract_phonetic(
                 # letters/digits correctly is rare. Verified against the
                 # false-positive corpus in test_phonetics.py.
                 evidence = 2 * run_strict + (2 / 3) * run_loose + (2 if cued else 0)
-                if evidence < 4:
+                if record is not None:
+                    record["attempts"].append({
+                        "text": text,
+                        "shaped": True,
+                        "rescued_o_as_zero": rescued,
+                        "evidence": round(evidence, 2),
+                        "accepted": evidence >= EVIDENCE_THRESHOLD,
+                    })
+                if evidence < EVIDENCE_THRESHOLD:
+                    if record is not None:
+                        record["outcome"] = "below_evidence"
                     continue
 
                 confidence = 0.25
@@ -861,6 +929,9 @@ def extract_phonetic(
                         suffix=run_suffix,
                     )
                 )
+                if record is not None:
+                    record["outcome"] = "accepted"
+                    record["accepted"] = [text]
                 break  # first (longest) shape-valid right-trim wins
             else:
                 continue
@@ -953,6 +1024,86 @@ def extract_callsigns(text: str) -> List[Candidate]:
             best[cand.callsign] = cand
 
     return sorted(best.values(), key=lambda c: c.confidence, reverse=True)
+
+
+def explain(text: str) -> Dict[str, Any]:
+    """
+    Run extraction over `text` and describe what happened, step by step.
+
+    Answers the question the logs cannot: not just what was found, but why
+    something obvious was NOT. Nearly every live miss has turned out to be
+    one of a handful of causes — a word missing from the vocabulary, a run
+    that assembled but scored under the evidence gate, or a shape that is not
+    a legal callsign — and all three are visible here.
+
+    Deliberately read-only and side-effect free: no QRZ lookup is made, so
+    this costs nothing and cannot be used to burn the instance's lookup quota
+    (the dashboard is reachable by anyone who can see the addon).
+    """
+    original = text or ""
+    analysed = _truncate_at_stroke(original)
+
+    result: Dict[str, Any] = {
+        "text": original,
+        "analysed_text": analysed,
+        "truncated_at_stroke": analysed != original,
+        "tokens": [],
+        "runs": [],
+        "candidates": [],
+    }
+    if not analysed.strip():
+        return result
+
+    tokens = tokenise(analysed)
+    if not tokens:
+        return result
+
+    tokens, cased = _split_hyphen_runs(tokens, _tokenise_cased(analysed))
+    cues = _cue_positions(tokens)
+    spelled = _spelled_positions_from(cased)
+
+    for idx, token in enumerate(tokens):
+        mapping = _mapping_with_spelled(token, idx in spelled)
+        result["tokens"].append({
+            "index": idx,
+            "token": token,
+            "cased": cased[idx] if idx < len(cased) else token,
+            "maps_to": mapping[0] if mapping else None,
+            "strict": mapping[1] if mapping else None,
+            "spelled": idx in spelled,
+            # A cue does not map to anything itself; it marks a position at
+            # which a callsign may plausibly begin.
+            "callsign_may_start_here": idx in cues,
+            "connector": token in CONNECTOR_WORDS,
+            "suffix_word": SUFFIX_WORDS.get(token),
+        })
+
+    trace: List[Dict[str, Any]] = []
+    candidates = extract_literal(analysed, tokens, cues)
+    candidates.extend(extract_phonetic(tokens, cues, spelled, trace=trace))
+    result["runs"] = trace
+
+    best: Dict[str, Candidate] = {}
+    for cand in candidates:
+        existing = best.get(cand.callsign)
+        if existing is None or cand.confidence > existing.confidence:
+            best[cand.callsign] = cand
+
+    for cand in sorted(best.values(), key=lambda c: c.confidence, reverse=True):
+        normalised = normalise_callsign(cand.callsign + cand.suffix)
+        result["candidates"].append({
+            "callsign": cand.callsign,
+            "normalised": normalised,
+            "source": cand.source,
+            "confidence": cand.confidence,
+            "strict_chars": cand.strict_tokens,
+            "loose_chars": cand.loose_tokens,
+            "cued": cand.cued,
+            "suffix": cand.suffix,
+            "context": cand.context,
+            "lookupable": is_lookupable(normalised),
+        })
+    return result
 
 
 # ---------------------------------------------------------------------------

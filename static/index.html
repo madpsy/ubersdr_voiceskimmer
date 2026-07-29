@@ -144,6 +144,37 @@
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
   }
+  /* Only the panels that carry a filter go flex — the transcript panels put
+     a whole flex layout of their own (.tp-head) inside the h2, which turning
+     every heading into a flex container would collapse. */
+  section.panel h2.with-filter {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+  .panel-filter {
+    margin-left: auto;
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text);
+    font: inherit;
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: 0;
+    padding: 3px 8px;
+    width: 160px;
+    max-width: 45%;
+  }
+  .panel-filter::placeholder { color: var(--dim); }
+  .panel-filter:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .panel-filter.active { border-color: var(--star); }
+
   .scroll {
     overflow-y: auto;
     max-height: 42vh;
@@ -177,6 +208,124 @@
   .transcript .final { color: var(--text); }
   .transcript .final .marker { color: var(--good); }
   .transcript .meta { color: var(--dim); }
+  /* Every rendered line can be interrogated — see the explain modal. */
+  .transcript .final { cursor: pointer; border-radius: 3px; }
+  .transcript .final:hover { background: #1c2128; outline: 1px solid var(--border); }
+
+  /* -- Explain modal ------------------------------------------------------ */
+  #explain-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(1, 4, 9, .75);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    z-index: 50;
+  }
+  #explain-backdrop.open { display: flex; }
+  #explain {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: min(860px, 100%);
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .6);
+  }
+  #explain header {
+    background: none;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 14px;
+    gap: 12px;
+  }
+  #explain header h2 {
+    font-size: 13px;
+    margin: 0;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  #explain-close {
+    margin-left: auto;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--dim);
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 3px 9px;
+  }
+  #explain-close:hover { color: var(--text); border-color: var(--accent); }
+  #explain-body { overflow-y: auto; padding: 14px; }
+  #explain-body h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--dim);
+    margin: 16px 0 7px;
+    font-weight: 500;
+  }
+  #explain-body h3:first-child { margin-top: 0; }
+  .ex-quote {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 8px 10px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .ex-summary {
+    padding: 9px 11px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+  .ex-summary.yes { background: #0f2f1a; border-color: var(--good); color: var(--good); }
+  .ex-summary.no { background: #2b2411; border-color: var(--warn); color: var(--warn); }
+  /* Token chips: what the extractor understood each word to be. The
+     unmapped ones are usually the answer, so they get the strongest tint. */
+  .ex-tokens { display: flex; flex-wrap: wrap; gap: 5px; }
+  .ex-tok {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 7px;
+    font-size: 12px;
+    background: #0d1117;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .ex-tok b { color: var(--accent); font-weight: 600; }
+  .ex-tok.strict { border-color: var(--good); }
+  .ex-tok.strict b { color: var(--good); }
+  .ex-tok.none { border-style: dashed; color: var(--dim); }
+  .ex-tok .tag {
+    color: var(--star);
+    font-size: 10px;
+    text-transform: uppercase;
+    margin-left: 4px;
+  }
+  #explain-body table { margin-top: 2px; }
+  #explain-body tbody td, #explain-body thead th { white-space: normal; }
+  .ex-note { color: var(--dim); font-size: 12px; margin: 6px 0 0; }
+  .ex-run {
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 9px 11px;
+    margin-bottom: 8px;
+    font-size: 12.5px;
+  }
+  .ex-run .assembled {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .ex-run .why { color: var(--dim); margin-top: 4px; }
+  .ex-run.ok { border-color: var(--good); }
 
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   thead th {
@@ -273,8 +422,12 @@
   <div id="transcripts"></div>
 
   <div id="side">
-  <section class="panel">
-    <h2>Confirmed callsigns</h2>
+  <section class="panel" id="confirmed-panel">
+    <h2 class="with-filter">
+      <span>Confirmed callsigns</span>
+      <input class="panel-filter" id="confirmed-filter" type="search"
+             placeholder="filter call / freq / name" aria-label="Filter confirmed callsigns">
+    </h2>
     <div class="scroll">
       <table id="confirmed-table">
         <thead><tr>
@@ -287,7 +440,11 @@
   </section>
 
   <section class="panel" id="spots-panel">
-    <h2>Recent DX spots submitted</h2>
+    <h2 class="with-filter">
+      <span>Recent DX spots submitted</span>
+      <input class="panel-filter" id="spots-filter" type="search"
+             placeholder="filter call / freq / name" aria-label="Filter DX spots">
+    </h2>
     <div class="scroll">
       <table id="spots-table">
         <thead><tr><th>Time</th><th>Call</th><th>Freq</th><th>Comment</th></tr></thead>
@@ -310,6 +467,18 @@
   </section>
   </div>
 </main>
+
+<!-- Click any completed transcript line to ask the extractor what it made of
+     it — see /api/explain. -->
+<div id="explain-backdrop">
+  <div id="explain" role="dialog" aria-modal="true" aria-labelledby="explain-title">
+    <header>
+      <h2 id="explain-title">Callsign extraction</h2>
+      <button id="explain-close" title="Close (Esc)">&times;</button>
+    </header>
+    <div id="explain-body"></div>
+  </div>
+</div>
 
 <script src="static/app.js"></script>
 </body>

@@ -9,7 +9,10 @@
 (() => {
   "use strict";
 
-  const TRANSCRIPT_MAX_LINES = 400;
+  // Per panel, not in total — with --parallel 2 each worker keeps its own
+  // scrollback. Matches the server's per-worker deque so a reload shows the
+  // same history the live view was holding.
+  const TRANSCRIPT_MAX_LINES = 200;
 
   const els = {
     uptime: document.getElementById("uptime"),
@@ -19,13 +22,50 @@
     spotsBody: document.querySelector("#spots-table tbody"),
     targetsBody: document.querySelector("#targets-table tbody"),
     receiver: document.getElementById("receiver"),
+    explainBackdrop: document.getElementById("explain-backdrop"),
+    explainBody: document.getElementById("explain-body"),
+    explainClose: document.getElementById("explain-close"),
+    confirmedFilter: document.getElementById("confirmed-filter"),
+    spotsFilter: document.getElementById("spots-filter"),
   };
 
   // Client-side copies, keyed the same way the server keeps them, so each
   // incremental event only has to touch one row instead of asking the
   // server for a full snapshot again.
   const confirmed = new Map();   // "callsign|freq_bucket" -> detection dict
+  // Spots are held here as well as rendered, because filtering has to be able
+  // to bring a hidden row back — a table built by appending rows as they
+  // arrive has nowhere to recover them from.
+  const spots = [];              // newest first, capped at SPOTS_MAX_ROWS
+  const SPOTS_MAX_ROWS = 100;
   let startTime = Date.now() / 1000;
+
+  // -- Row filtering --------------------------------------------------------
+
+  // Matched against the same values the row displays, so what you see is what
+  // you filter. Frequency is included both formatted and raw so "14.226",
+  // "14226" and "14226000" all find the same row.
+  function haystack(parts) {
+    return parts.filter((p) => p != null && p !== "").join(" ").toLowerCase();
+  }
+
+  function freqTerms(hz) {
+    return hz ? [fmtFreq(hz), String(hz), String(hz / 1000)] : [];
+  }
+
+  // Space-separated terms all have to match, so "g0 england" narrows rather
+  // than widening — the usual expectation for a filter box.
+  function matches(hay, query) {
+    if (!query) return true;
+    return query.toLowerCase().split(/\s+/).filter(Boolean)
+      .every((term) => hay.includes(term));
+  }
+
+  function filterQuery(input) {
+    const q = input ? input.value.trim() : "";
+    if (input) input.classList.toggle("active", q !== "");
+    return q;
+  }
 
   // -- Formatting -----------------------------------------------------------
 
@@ -262,6 +302,11 @@
     const line = document.createElement("div");
     line.className = "final";
     line.innerHTML = lineHTML(entry, "✓");
+    // The text is carried on the element rather than looked up later: lines
+    // are evicted as the transcript scrolls, and the click has to explain
+    // exactly what was rendered here.
+    line.dataset.text = entry.text;
+    line.title = "Click to see what the extractor made of this line";
     // Keep the live line last so the in-progress text stays at the bottom.
     p.transcript.insertBefore(line, p.liveLine);
 
@@ -293,6 +338,175 @@
     if (atBottom) p.scroll.scrollTop = p.scroll.scrollHeight;
   }
 
+  // -- Explain modal --------------------------------------------------------
+
+  // Why a given transcript line did or did not produce a callsign. The
+  // scanner's own logs answer this only for lines that got far enough to be
+  // logged; the interesting cases are the silent ones, where a callsign is
+  // plainly audible in the text and nothing came out.
+
+  function closeExplain() {
+    els.explainBackdrop.classList.remove("open");
+  }
+
+  function openExplain(text) {
+    els.explainBackdrop.classList.add("open");
+    els.explainBody.innerHTML = '<p class="ex-note">Analysing…</p>';
+    fetch("api/explain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+      .then(renderExplain)
+      .catch((err) => {
+        els.explainBody.innerHTML =
+          `<p class="ex-note">Could not analyse this line: ${esc(String(err))}</p>`;
+      });
+  }
+
+  function tokenChip(t) {
+    let cls = "ex-tok";
+    if (t.maps_to === null) cls += " none";
+    else if (t.strict) cls += " strict";
+
+    const arrow = t.maps_to === null
+      ? '<span class="tag">no match</span>'
+      : ` → <b>${esc(t.maps_to)}</b>`;
+
+    let tags = "";
+    if (t.spelled) tags += '<span class="tag">spelled</span>';
+    if (t.connector) tags += '<span class="tag">bridge</span>';
+    if (t.suffix_word) tags += `<span class="tag">${esc(t.suffix_word)}</span>`;
+    if (t.callsign_may_start_here) tags += '<span class="tag">cue</span>';
+
+    return `<span class="${cls}">${esc(t.cased)}${arrow}${tags}</span>`;
+  }
+
+  function runBlock(run) {
+    const promoted = run.accepted && run.accepted.length > 0;
+    let why;
+    if (run.outcome === "split") {
+      why = `Two callsigns run together — split into ${esc(run.accepted.join(" + "))}`;
+    } else if (run.outcome === "accepted") {
+      why = `Accepted as ${esc(run.accepted.join(", "))}`;
+    } else if (run.outcome === "below_evidence") {
+      why =
+        `Callsign-shaped, but the evidence score of ${run.evidence} is under ` +
+        `the threshold of ${run.threshold} — too much of it came from ` +
+        `ambiguous everyday words`;
+    } else if (run.outcome === "split_below_evidence") {
+      why = `Splits into ${esc((run.split_into || []).join(" + "))}, but scored ` +
+        `${run.evidence} against a threshold of ${run.threshold}`;
+    } else {
+      why = "No part of this run is a legal callsign shape";
+    }
+
+    const tried = (run.attempts || [])
+      .map((a) => `${a.text}${a.shaped ? "" : " (wrong shape)"}`)
+      .join(", ");
+
+    return (
+      `<div class="ex-run${promoted ? " ok" : ""}">` +
+      `<span class="assembled">${esc(run.text)}</span>` +
+      ` <span class="ex-note">from “${esc(run.tokens.join(" "))}”</span>` +
+      `<div class="why">${why}</div>` +
+      (tried ? `<div class="why">Tried: ${esc(tried)}</div>` : "") +
+      `</div>`
+    );
+  }
+
+  function renderExplain(d) {
+    const anyLookedUp = d.candidates.some((c) => c.verdict.reached_qrz);
+    const parts = [];
+
+    parts.push(
+      `<div class="ex-summary ${anyLookedUp ? "yes" : "no"}">${esc(d.summary)}</div>`
+    );
+
+    parts.push("<h3>Line</h3>");
+    parts.push(`<div class="ex-quote">${esc(d.text)}</div>`);
+    if (d.truncated_at_stroke) {
+      parts.push(
+        '<p class="ex-note">A spoken “stroke” ends the callsign, so only ' +
+        `“${esc(d.analysed_text)}” was analysed.</p>`
+      );
+    }
+
+    if (d.tokens.length) {
+      parts.push("<h3>What each word became</h3>");
+      parts.push(
+        `<div class="ex-tokens">${d.tokens.map(tokenChip).join("")}</div>`
+      );
+      const unmapped = d.tokens.filter((t) => t.maps_to === null).length;
+      if (unmapped) {
+        parts.push(
+          `<p class="ex-note">${unmapped} word${unmapped === 1 ? "" : "s"} ` +
+          "matched nothing. A run of letters stops at each of these, so a " +
+          "mis-heard phonetic word in the middle of a callsign splits it in two.</p>"
+        );
+      }
+    }
+
+    if (d.runs.length) {
+      parts.push("<h3>Runs assembled</h3>");
+      parts.push(d.runs.map(runBlock).join(""));
+    }
+
+    if (d.candidates.length) {
+      parts.push("<h3>Candidates</h3>");
+      parts.push(
+        '<table><thead><tr><th>Callsign</th><th>Source</th>' +
+        "<th>Confidence</th><th>What happened</th></tr></thead><tbody>" +
+        d.candidates
+          .map((c) => {
+            const badge = c.verdict.reached_qrz
+              ? '<span class="badge spotted">looked up</span>'
+              : '<span class="badge no">dropped</span>';
+            return (
+              `<tr><td class="call">${esc(c.normalised)}</td>` +
+              `<td>${esc(c.source)}</td>` +
+              `<td>${c.confidence.toFixed(2)}</td>` +
+              `<td>${badge} ${esc(c.verdict.detail)}</td></tr>`
+            );
+          })
+          .join("") +
+        "</tbody></table>"
+      );
+      parts.push(
+        '<p class="ex-note">“Looked up” means it reached QRZ. Whether it ' +
+        "became a spot depends on QRZ holding the callsign, and on being " +
+        `heard ${d.gates.spot_min_hits ?? "enough"} times on the same ` +
+        "frequency.</p>"
+      );
+    }
+
+    els.explainBody.innerHTML = parts.join("");
+    els.explainBody.scrollTop = 0;
+  }
+
+  // Delegated, because transcript lines are created and evicted constantly.
+  els.transcripts.addEventListener("click", (e) => {
+    const line = e.target.closest(".final");
+    if (line && line.dataset.text) openExplain(line.dataset.text);
+  });
+  els.explainClose.addEventListener("click", closeExplain);
+  els.explainBackdrop.addEventListener("click", (e) => {
+    if (e.target === els.explainBackdrop) closeExplain();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeExplain();
+  });
+
+  // Filters redraw from the client-side copies, so a row hidden by the filter
+  // is still updated by incoming events and reappears the moment it matches.
+  if (els.confirmedFilter) {
+    els.confirmedFilter.addEventListener("input", redrawConfirmed);
+  }
+  if (els.spotsFilter) {
+    els.spotsFilter.addEventListener("input", redrawSpots);
+  }
+
   // -- Confirmed callsigns table --------------------------------------------
 
   function renderConfirmedRow(det) {
@@ -301,12 +515,25 @@
   }
 
   function redrawConfirmed() {
-    const rows = [...confirmed.values()].sort(
+    const query = filterQuery(els.confirmedFilter);
+    const all = [...confirmed.values()].sort(
       (a, b) => (b.timestamp || 0) - (a.timestamp || 0)
     );
+    const rows = all.filter((d) =>
+      matches(
+        haystack([
+          d.normalised, d.band, d.mode, d.name, d.country,
+          ...freqTerms(d.frequency),
+        ]),
+        query
+      )
+    );
     if (rows.length === 0) {
+      const msg = all.length
+        ? `no rows match “${esc(query)}”`
+        : "no callsigns confirmed yet";
       els.confirmedBody.innerHTML =
-        '<tr class="empty-row"><td colspan="10">no callsigns confirmed yet</td></tr>';
+        `<tr class="empty-row"><td colspan="10">${msg}</td></tr>`;
       return;
     }
     els.confirmedBody.innerHTML = rows
@@ -343,15 +570,35 @@
   }
 
   function renderSpotRow(spot) {
-    if (els.spotsBody.querySelector(".empty-row")) els.spotsBody.innerHTML = "";
-    const row = document.createElement("tr");
-    row.innerHTML =
-      `<td>${fmtTime(spot.time)}</td><td class="call">${esc(spot.callsign)}</td>` +
-      `<td>${fmtFreq(spot.freq)}</td><td>${esc(spot.comment)}</td>`;
-    els.spotsBody.insertBefore(row, els.spotsBody.firstChild);
-    while (els.spotsBody.children.length > 100) {
-      els.spotsBody.removeChild(els.spotsBody.lastChild);
+    spots.unshift(spot);                       // newest first
+    if (spots.length > SPOTS_MAX_ROWS) spots.length = SPOTS_MAX_ROWS;
+    redrawSpots();
+  }
+
+  function redrawSpots() {
+    const query = filterQuery(els.spotsFilter);
+    const rows = spots.filter((s) =>
+      matches(
+        haystack([s.callsign, s.comment, ...freqTerms(s.freq)]),
+        query
+      )
+    );
+    if (rows.length === 0) {
+      const msg = spots.length
+        ? `no rows match “${esc(query)}”`
+        : "no spots submitted yet";
+      els.spotsBody.innerHTML =
+        `<tr class="empty-row"><td colspan="4">${msg}</td></tr>`;
+      return;
     }
+    els.spotsBody.innerHTML = rows
+      .map(
+        (s) =>
+          `<tr><td>${fmtTime(s.time)}</td>` +
+          `<td class="call">${esc(s.callsign)}</td>` +
+          `<td>${fmtFreq(s.freq)}</td><td>${esc(s.comment)}</td></tr>`
+      )
+      .join("");
   }
 
   // -- Band/freq activity ---------------------------------------------------
@@ -470,12 +717,13 @@
     confirmed.clear();
     (state.confirmed || []).forEach((d) => confirmed.set(d.key, d));
     redrawConfirmed();
-    els.spotsBody.innerHTML = "";
-    // Snapshot spots arrive oldest-first and renderSpotRow inserts each at the
-    // top, so replaying them in order leaves the newest at the top — matching
-    // how live spots land. Reversing here as well would flip it back and put
-    // the oldest first on every page load.
+    // Snapshot spots arrive oldest-first and renderSpotRow unshifts each to
+    // the front, so replaying them in order leaves the newest at the top —
+    // matching how live spots land. Reversing here as well would flip it back
+    // and put the oldest first on every page load.
+    spots.length = 0;
     (state.spots || []).forEach(renderSpotRow);
+    redrawSpots();
     renderTargets(state.targets);
   }
 

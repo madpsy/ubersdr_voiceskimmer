@@ -12,10 +12,14 @@ junk, but every rejection is a wasted lookup and a polluted log.
 import unittest
 
 from phonetics import (
+    EVIDENCE_THRESHOLD,
+    _cue_positions,
     _tokenise_cased,
     _letter_o_as_zero,
     _split_joined_callsigns,
+    explain,
     extract_callsigns,
+    extract_phonetic,
     is_callsign_shaped,
     is_lookupable,
     normalise_callsign,
@@ -787,6 +791,84 @@ class TestLiveMissRegressions(unittest.TestCase):
         # can be spotted if QRZ happens to hold it.
         for text, want in self.CASES:
             self.assertEqual(confident_calls(text), [want], text)
+
+
+class TestExplain(unittest.TestCase):
+    """
+    explain() backs the dashboard's "why did this line not produce a
+    callsign" modal. Its one real risk is drifting from what extraction
+    actually does — an explanation that disagrees with the scanner is worse
+    than none, because it sends you looking in the wrong place. It is wired
+    through the real extract_phonetic() via its trace hook rather than
+    reimplementing the walk, and this asserts that end to end.
+    """
+
+    CORPUS = [
+        "GW4 F-O-I",
+        "All the best, 2E1, G.A.F.",
+        "Mike 7, Charlie Echo Hotel, Mike Zero November at Straight Delta.",
+        "This is India Kilo-1, Mike, November Foxtrot stroke, Italy Alpha 5.",
+        "A Gulf Zero, Victor, Italy, Mike in the southeast of England, Roger.",
+        "Good morning, a very nice signal here today.",
+        "Running 100W into a dipole on 40M here.",
+        "This is Mike Zero Alpha Bravo Charlie calling CQ",
+        "",
+        "   ",
+    ]
+
+    def test_candidates_match_real_extraction(self):
+        for text in self.CORPUS:
+            explained = [c["callsign"] for c in explain(text)["candidates"]]
+            actual = [c.callsign for c in extract_callsigns(text)]
+            self.assertEqual(explained, actual, text)
+
+    def test_reports_the_word_that_matched_nothing(self):
+        # The commonest cause of a live miss, and the thing the modal exists
+        # to surface.
+        tokens = {t["token"]: t for t in explain("Sera Papa Alpha")["tokens"]}
+        self.assertIsNone(tokens["sera"]["maps_to"])
+        self.assertEqual(tokens["papa"]["maps_to"], "P")
+        self.assertTrue(tokens["papa"]["strict"])
+
+    def test_reports_the_evidence_score_against_the_gate(self):
+        runs = explain("gw4 f-o-i")["runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["text"], "GW4FOI")
+        self.assertEqual(runs[0]["threshold"], EVIDENCE_THRESHOLD)
+        self.assertGreater(runs[0]["evidence"], 0)
+
+    def test_reports_a_split_run(self):
+        runs = explain(
+            "Mike 7, Charlie Echo Hotel, Mike Zero November"
+        )["runs"]
+        split = [r for r in runs if r["outcome"] == "split"]
+        self.assertEqual(len(split), 1)
+        self.assertEqual(split[0]["accepted"], ["M7CEH", "M0N"])
+
+    def test_reports_stroke_truncation(self):
+        d = explain("Mike Zero Alpha Bravo stroke Golf Four Romeo Sugar")
+        self.assertTrue(d["truncated_at_stroke"])
+        self.assertNotIn("Golf", d["analysed_text"])
+
+    def test_empty_input_is_not_an_error(self):
+        for text in ["", "   ", None]:
+            d = explain(text)
+            self.assertEqual(d["candidates"], [])
+            self.assertEqual(d["runs"], [])
+
+    def test_tracing_does_not_change_extraction(self):
+        # The trace hook writes into a list passed by the caller; it must not
+        # perturb the candidates themselves.
+        for text in self.CORPUS:
+            tokens = tokenise(text)
+            if not tokens:
+                continue
+            cues = _cue_positions(tokens)
+            untraced = [c.callsign for c in extract_phonetic(tokens, cues)]
+            traced = [
+                c.callsign for c in extract_phonetic(tokens, cues, trace=[])
+            ]
+            self.assertEqual(untraced, traced, text)
 
 
 if __name__ == "__main__":

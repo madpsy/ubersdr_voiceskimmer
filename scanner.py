@@ -1348,7 +1348,16 @@ def main(argv=None) -> int:
 
     web_ui = None
     if args.web_port:
-        web_ui = WebUI(workers=parallel)
+        web_ui = WebUI(
+            workers=parallel,
+            # So /api/explain can report which gate a candidate died at
+            # rather than only that extraction produced nothing.
+            gates={
+                "min_extract_confidence": args.min_extract_confidence,
+                "min_callsign_length": args.min_callsign_length,
+                "spot_min_hits": args.spot_min_hits,
+            },
+        )
         web_ui.start(args.web_host, args.web_port)
 
     base_url = f"{'https' if args.ssl else 'http'}://{args.host}:{args.port}"
