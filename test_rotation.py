@@ -10,6 +10,11 @@ the band never gets scanned.
 
 import time
 import unittest
+
+from activity import Target
+from lookup import LookupResult
+from scanner import CallsignScanner, SharedState, parse_args
+from ubersdr import Segment
 from unittest import mock
 
 import activity
@@ -299,6 +304,66 @@ class TestBandFilter(unittest.TestCase):
     def test_cli_rejects_empty_band(self):
         with self.assertRaises(SystemExit):
             scanner.parse_args(["--host", "x", "--band", " , ,"])
+
+
+class TestSegmentJoinDoesNotDoubleCount(unittest.TestCase):
+    """
+    The joined pass re-reads the raw segment's text, so a callsign that
+    fits inside one segment was extracted twice: announced twice, written
+    twice, and credited two corroboration hits for a single hearing —
+    which silently defeated --spot-min-hits, spotting on the first
+    hearing however high it was set.
+    """
+
+    def _scanner(self, **overrides):
+        argv = ["--host", "x"] + [a for k, v in overrides.items()
+                                  for a in (f"--{k.replace('_','-')}", str(v))]
+        args = parse_args(argv)
+        shared = SharedState(args, "http://x")
+        sc = CallsignScanner(args, shared=shared)
+        self.announced, self.spotted = [], []
+        outer = self
+        class V:
+            def validate(self, c):
+                return LookupResult(c, valid=True, checked=True, name="N")
+        class S:
+            def submit(self, f, c, cm):
+                outer.spotted.append(c); return True
+        sc.validator = V()
+        sc._announce = lambda d, r: outer.announced.append(d.normalised)
+        sc._write = lambda d: None
+        shared.spotter = S()
+        sc.web = None
+        return sc, shared
+
+    def _feed(self, sc, history, raw):
+        t = Target(band="20m", dial_freq=14270000, mode="usb", snr=20, confidence=0.8)
+        class A:
+            certain, straddled, overlap_fraction = True, False, 1.0
+        sc._segment_history = [Segment(text=history, start=0.0, end=2.0,
+                                       completed=True, received_at=0)]
+        seg = Segment(text=raw, start=2.5, end=5.0, completed=True, received_at=1)
+        seen = set()
+        sc._process(seg, t, A(), seen)
+        joined = sc._joined_history_text(seg)
+        if joined:
+            sc._process(Segment(text=joined, start=0.0, end=5.0, completed=True,
+                                received_at=1), t, A(), seen)
+
+    def test_one_hearing_is_one_hit(self):
+        sc, shared = self._scanner(spot_min_hits=2)
+        self._feed(sc, "good morning to you",
+                   "this is mike zero alpha bravo charlie")
+        self.assertEqual(self.announced, ["M0ABC"])
+        self.assertEqual(shared.spot_throttle.hits("M0ABC", 14270000), 1)
+        self.assertEqual(self.spotted, [], "spotted on a single hearing")
+
+    def test_split_across_the_vad_break_still_recovered(self):
+        # The whole reason the join exists — this callsign appears in
+        # neither segment alone.
+        sc, shared = self._scanner()
+        self._feed(sc, "this is golf mike 6", "zulu alpha kilo")
+        self.assertIn("GM6ZAK", self.announced)
 
 
 if __name__ == "__main__":

@@ -649,7 +649,8 @@ class CallsignScanner:
                         target.dial_freq / 1e6, attribution.overlap_fraction * 100,
                     )
 
-            detections = self._process(segment, target, attribution)
+            seen: Set[str] = set()
+            detections = self._process(segment, target, attribution, seen)
 
             # Also try joining with recent completed segments on this same
             # frequency: WhisperLive's VAD forces a segment break every 15s
@@ -671,7 +672,9 @@ class CallsignScanner:
                         completed=True,
                         received_at=segment.received_at,
                     )
-                    detections = detections + self._process(joined_segment, target, attribution)
+                    detections = detections + self._process(
+                        joined_segment, target, attribution, seen
+                    )
 
                 self._segment_history.append(segment)
                 if len(self._segment_history) > 3:
@@ -729,8 +732,21 @@ class CallsignScanner:
     # -- Extraction and validation -----------------------------------------
 
     def _process(
-        self, segment: Segment, target: Target, attribution
+        self, segment: Segment, target: Target, attribution,
+        seen: Optional[Set[str]] = None,
     ) -> List[Detection]:
+        """
+        Extract, validate and act on the callsigns in one segment.
+
+        `seen` carries the callsigns already handled for this arrival, so the
+        segment-join pass does not re-handle what the raw pass just found.
+        The joined text CONTAINS the raw segment, so without it every
+        callsign that fits inside a single segment is processed twice: two
+        announcements, two JSONL rows, and two corroboration hits from a
+        single hearing — which silently defeats --spot-min-hits, spotting on
+        the first hearing however high it is set. Only a callsign split
+        across the VAD break is genuinely new in the joined pass.
+        """
         candidates = extract_callsigns(segment.text)
         if not candidates:
             return []
@@ -740,8 +756,13 @@ class CallsignScanner:
             if cand.confidence < self.args.min_extract_confidence:
                 continue
 
-            self.shared.bump("candidates")
             normalised = normalise_callsign(cand.callsign)
+            if seen is not None:
+                if normalised in seen:
+                    continue          # already handled for this arrival
+                seen.add(normalised)
+
+            self.shared.bump("candidates")
 
             # Re-check the shape after normalisation — stripping a prefix
             # overlay can leave something that is no longer a callsign, and the
