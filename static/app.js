@@ -29,6 +29,7 @@
     spotsFilter: document.getElementById("spots-filter"),
     confirmedStop: document.getElementById("confirmed-stop"),
     spotsStop: document.getElementById("spots-stop"),
+    targetsStop: document.getElementById("targets-stop"),
   };
 
   // Client-side copies, keyed the same way the server keeps them, so each
@@ -681,13 +682,13 @@
   }
 
   function paintRowAudio() {
-    for (const body of [els.confirmedBody, els.spotsBody]) {
+    for (const body of [els.confirmedBody, els.spotsBody, els.targetsBody]) {
       if (!body) continue;
       for (const tr of body.querySelectorAll("tr")) {
         tr.classList.toggle("playing", !!playingKey && tr.dataset.key === playingKey);
       }
     }
-    for (const btn of [els.confirmedStop, els.spotsStop]) {
+    for (const btn of [els.confirmedStop, els.spotsStop, els.targetsStop]) {
       if (!btn) continue;
       btn.disabled = !playingKey;
       btn.classList.toggle("on", !!playingKey);
@@ -758,8 +759,10 @@
   }
   wireRowClicks(els.confirmedBody);
   wireRowClicks(els.spotsBody);
-  if (els.confirmedStop) els.confirmedStop.addEventListener("click", stopRowAudio);
-  if (els.spotsStop) els.spotsStop.addEventListener("click", stopRowAudio);
+  wireRowClicks(els.targetsBody);
+  for (const btn of [els.confirmedStop, els.spotsStop, els.targetsStop]) {
+    if (btn) btn.addEventListener("click", stopRowAudio);
+  }
 
   // -- Explain modal --------------------------------------------------------
 
@@ -1057,7 +1060,8 @@
           ? `<span class="star">★</span> ${esc(t.dx_callsign)}`
           : "";
         return (
-          `<tr class="${bandClass(t.band)}">` +
+          `<tr class="${bandClass(t.band)}" data-key="target:${t.dial_freq}"` +
+          ` data-freq="${t.dial_freq}" data-mode="${escAttr(t.mode || "")}">` +
           `<td>${esc(t.band)}</td><td>${fmtFreq(t.dial_freq)}</td>` +
           `<td>${esc((t.mode || "").toUpperCase())}</td>` +
           `<td>${(t.snr ?? 0).toFixed(1)}</td><td>${(t.confidence ?? 0).toFixed(2)}</td>` +

@@ -232,13 +232,19 @@
   .panel-stop:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
   .panel-stop:disabled { opacity: .35; cursor: default; }
   .panel-stop.on { background: #3a1518; border-color: var(--bad); color: var(--bad); }
+  /* In a title bar with no filter input there is nothing else claiming the
+     free space, so the button takes it. */
+  .panel-stop.solo { margin-left: auto; }
 
-  #confirmed-table tbody tr, #spots-table tbody tr { cursor: pointer; }
+  #confirmed-table tbody tr, #spots-table tbody tr,
+  #targets-table tbody tr { cursor: pointer; }
   /* Beats the band tint and the hover rule, which both target the row. */
   #confirmed-table tbody tr.playing,
   #spots-table tbody tr.playing,
+  #targets-table tbody tr.playing,
   #confirmed-table tbody tr.playing:hover,
-  #spots-table tbody tr.playing:hover {
+  #spots-table tbody tr.playing:hover,
+  #targets-table tbody tr.playing:hover {
     background: #113a1e;
     box-shadow: inset 2px 0 0 var(--good);
   }
@@ -686,7 +692,11 @@
   </section>
 
   <section class="panel" id="targets-panel">
-    <h2 class="with-filter"><button class="panel-toggle" aria-expanded="true" title="Collapse"></button><span>Band / frequency activity</span></h2>
+    <h2 class="with-filter">
+      <button class="panel-toggle" aria-expanded="true" title="Collapse"></button>
+      <span>Band / frequency activity</span>
+      <button class="panel-stop solo" id="targets-stop" title="Stop preview audio" disabled>&#x25A0; Stop</button>
+    </h2>
     <div class="scroll">
       <table id="targets-table">
         <thead><tr>

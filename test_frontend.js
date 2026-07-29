@@ -141,7 +141,7 @@ const ID_LIST = [
   "uptime", "stats", "transcripts", "receiver", "explain-backdrop",
   "explain-body", "explain-close", "confirmed-filter", "spots-filter",
   "map", "map-note", "layer-confirmed", "layer-spotted",
-  "confirmed-stop", "spots-stop",
+  "confirmed-stop", "spots-stop", "targets-stop",
 ];
 for (const id of ID_LIST) byId[id] = new El("div");
 byId["layer-confirmed"].checked = true;
@@ -217,6 +217,8 @@ assert.notStrictEqual(patched, src, "could not find the IIFE close in app.js");
 // raises and the suite fails.
 eval(patched);
 const T = globalThis.__test;
+
+function stopRowAudioForTest() { T.stopRowAudio(); }
 
 let failures = 0;
 function check(name, fn) {
@@ -413,7 +415,24 @@ check("clicking a table row previews that frequency and mode", () => {
   assert.strictEqual(start[2], "usb", "should use the recorded mode");
 });
 
+check("activity rows preview too", () => {
+  stopRowAudioForTest();
+  global.__radioCalls.length = 0;
+  const rows = T.els.targetsBody.querySelectorAll("tr");
+  assert.ok(rows.length, "no activity rows carrying data-freq");
+  T.els.targetsBody.fire("click", { target: rows[0] });
+  const start = global.__radioCalls.find((c) => c[0] === "start" || c[0] === "tune");
+  assert.ok(start, `no preview started: ${JSON.stringify(global.__radioCalls)}`);
+  assert.strictEqual(start[1], 14226000);
+  assert.strictEqual(byId["targets-stop"].disabled, false, "activity Stop not armed");
+  // One shared stream: the other panels' buttons arm as well.
+  assert.strictEqual(byId["confirmed-stop"].disabled, false);
+  stopRowAudioForTest();
+});
+
 check("the Stop button in the title bar ends it", () => {
+  const rows = T.els.confirmedBody.querySelectorAll("tr");
+  T.els.confirmedBody.fire("click", { target: rows[0] });   // start something
   global.__radioCalls.length = 0;
   assert.strictEqual(byId["confirmed-stop"].disabled, false, "Stop not enabled while playing");
   byId["confirmed-stop"].fire("click");
