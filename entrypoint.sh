@@ -32,7 +32,8 @@
 #   SPOT_TAG              Tag prefixed to every spot comment      (default: [Voice])
 #   SPOT_COOLDOWN         Seconds before re-spotting the same station (default: 900)
 #   SPOT_FREQ_TOLERANCE   Hz tolerance for the spot cooldown       (default: 100)
-#   SPOT_MIN_LENGTH       Minimum callsign length to spot          (default: 4)
+#   MIN_CALLSIGN_LENGTH   Minimum length for a phonetically-assembled callsign
+#                         to be looked up at all (default: 4)
 #   SPOT_MIN_HITS         Decodes of the same callsign on the same frequency
 #                         required before spotting (default: 1)
 #   WEB_PORT              Dashboard port                          (default: 6098, 0 disables)
@@ -69,7 +70,9 @@ args=""
 [ -n "$SPOT_TAG"             ] && args="$args --spot-tag $SPOT_TAG"
 [ -n "$SPOT_COOLDOWN"        ] && args="$args --spot-cooldown $SPOT_COOLDOWN"
 [ -n "$SPOT_FREQ_TOLERANCE"  ] && args="$args --spot-freq-tolerance $SPOT_FREQ_TOLERANCE"
-[ -n "$SPOT_MIN_LENGTH"      ] && args="$args --spot-min-length $SPOT_MIN_LENGTH"
+# SPOT_MIN_LENGTH is the former name; it now gates the lookup, not just the spot.
+[ -n "$SPOT_MIN_LENGTH"      ] && args="$args --min-callsign-length $SPOT_MIN_LENGTH"
+[ -n "$MIN_CALLSIGN_LENGTH"  ] && args="$args --min-callsign-length $MIN_CALLSIGN_LENGTH"
 [ -n "$SPOT_MIN_HITS"        ] && args="$args --spot-min-hits $SPOT_MIN_HITS"
 
 [ -n "$WEB_PORT"             ] && args="$args --web-port $WEB_PORT"

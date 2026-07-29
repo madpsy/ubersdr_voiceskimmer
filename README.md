@@ -152,6 +152,7 @@ exact frequency, so on a quiet instance expect zeroes.
 | `--revisit-cooldown` | 120 s | How long before a frequency may be revisited |
 | `--min-snr` | 8.0 | Raise to skip marginal signals |
 | `--min-extract-confidence` | 0.4 | Raise for precision, lower for recall |
+| `--min-callsign-length` | 4 | Minimum length for a phonetically-assembled callsign to be looked up at all — shorter ones never reach QRZ, so are never confirmed or spotted (literal verbatim matches exempt) |
 | `--pipeline-latency` | 2.0 s | Raise if your WhisperLive is slow (affects frequency attribution) |
 | `--verbose` | off | Log every transcript segment and rejection — use this while testing |
 | `--no-prefilter` | off | Send every candidate to QRZ, skipping the free CTY filter |
@@ -179,7 +180,6 @@ callsign and password to log in with.
 | `--spot-cooldown` | 900 s | Re-spot the same (callsign, frequency) once this elapses — a station still active later is itself useful information |
 | `--spot-freq-tolerance` | 100 Hz | Frequency tolerance for the cooldown, since the detector's dial-frequency estimate can wobble slightly between hearings |
 | `--spot-max-entries` | 1000 | Cap on remembered cooldown entries, oldest/least-recent evicted first |
-| `--spot-min-length` | 4 | Minimum candidate length before a phonetically-assembled callsign is spotted (literal verbatim matches are exempt) |
 | `--spot-min-hits` | 1 | Decodes of the same callsign on the same frequency required before spotting. Above 1 trades latency for confidence — a wrong callsign assembled from one garbled pass is unlikely to be assembled identically again |
 | `--spot-tag` | `[Voice]` | Tag prefixed to every spot comment |
 

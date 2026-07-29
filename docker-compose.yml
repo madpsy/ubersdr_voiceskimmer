@@ -57,7 +57,11 @@ services:
       # SPOT_TAG: "[Voice]"
       # SPOT_COOLDOWN: "900"
       # SPOT_FREQ_TOLERANCE: "100"
-      # SPOT_MIN_LENGTH: "4"
+      # Minimum length for a phonetically-assembled callsign to be looked up
+      # at all. Anything shorter is dropped before QRZ, so it is never
+      # confirmed, logged as valid, or spotted. Literal verbatim matches are
+      # exempt.
+      # MIN_CALLSIGN_LENGTH: "4"
       #
       # Decodes of the same callsign on the same frequency required before a
       # spot goes out (default 1). Above 1 trades latency for confidence — a

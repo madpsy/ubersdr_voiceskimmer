@@ -124,6 +124,7 @@ class SharedState:
         self.stats = {
             "dwells": 0, "segments": 0, "candidates": 0, "malformed": 0,
             "validated": 0, "rejected": 0, "dx_agreements": 0, "straddled": 0,
+            "too_short": 0,
         }
 
         self.log_lock = threading.Lock()
@@ -751,6 +752,28 @@ class CallsignScanner:
                     log.info("   – %s → %s, not lookupable", cand.callsign, normalised)
                 continue
 
+            # Length gate, before spending a lookup. A 3-character candidate
+            # is the shortest shape a callsign can take (1-letter prefix +
+            # digit + 1-letter suffix — see CALLSIGN_RE), which also makes it
+            # the shape most likely to coincidentally match a real but
+            # unrelated station. Observed live: "kilo five india" and "kilo
+            # five delta" torn out of noisy transcripts both validated
+            # against real hams who were never on the air, so QRZ cannot save
+            # us here — the only defence is not asking.
+            #
+            # Literal matches are exempt: a callsign Whisper wrote out
+            # verbatim is far stronger evidence than a short run assembled
+            # token by token.
+            if (cand.source == "phonetic"
+                    and len(normalised) < self.args.min_callsign_length):
+                self.shared.bump("too_short")
+                if self.args.verbose:
+                    log.info(
+                        "   – %s too short (%d chars, need %d) — not looked up",
+                        normalised, len(normalised), self.args.min_callsign_length,
+                    )
+                continue
+
             # QRZ is the arbiter. The extractor will invent callsign-shaped
             # strings out of ordinary speech; only a real registry lookup can
             # tell those apart from genuine stations.
@@ -824,32 +847,8 @@ class CallsignScanner:
         """
         if self.shared.spotter is None:
             return
-        # Literal matches (source="literal") are a whole callsign written out
-        # verbatim in the transcript, not assembled token-by-token — stronger
-        # evidence than any phonetic run, not weaker. Only phonetic candidates
-        # need the gate.
-        #
-        # The gate is on candidate LENGTH, not token/evidence count: a
-        # 3-character candidate is the shortest shape a callsign can take
-        # (1-letter prefix + digit + 1-letter suffix — see CALLSIGN_RE), so
-        # it's also the shape most likely to coincidentally match a real but
-        # unrelated station in QRZ. Observed live: "kilo five india"/"kilo
-        # five delta" torn out of noisy transcripts (K5I, K5D) both happened
-        # to validate against unrelated real hams, while every 4+ char
-        # candidate seen (R5WH, K5SI, DF0AN, ...) was a clean, complete
-        # phonetic spelling. Token/evidence-count gating was tried first and
-        # rejected: short genuine callsigns just don't have many characters,
-        # so it blocked good 4-char calls (R5WH) as readily as bad 3-char
-        # ones.
-        if (detection.source == "phonetic"
-                and len(detection.normalised) < self.args.spot_min_length):
-            if self.args.verbose:
-                log.info(
-                    "   – %s not spotted (only %d chars, need %d)",
-                    detection.normalised, len(detection.normalised),
-                    self.args.spot_min_length,
-                )
-            return
+        # No length check here — --min-callsign-length is applied before the
+        # lookup in _process, so anything too short never became a detection.
 
         # Corroboration gate. Counted only for candidates that already cleared
         # the quality gates above, so it measures spottable decodes rather
@@ -980,6 +979,7 @@ class CallsignScanner:
         print(f"  Segments transcribed: {self.stats['segments']}")
         print(f"  Candidates extracted: {self.stats['candidates']}")
         print(f"  Dropped (malformed):  {self.stats['malformed']}")
+        print(f"  Dropped (too short):  {self.stats['too_short']}")
         print(f"  Validated by QRZ:     {self.stats['validated']}")
         print(f"  Rejected by QRZ:      {self.stats['rejected']}")
         print(f"  Matched a DX spot:    {self.stats['dx_agreements']}")
@@ -1105,6 +1105,19 @@ def parse_args(argv=None):
                       help="Ignore activity below this detector confidence")
 
     extract = parser.add_argument_group("extraction")
+    extract.add_argument("--min-callsign-length", type=int, default=4,
+                         help="Minimum character length for a "
+                              "phonetically-assembled callsign to be looked "
+                              "up at all (default 4; literal verbatim matches "
+                              "are exempt). Anything shorter is discarded "
+                              "before QRZ, so it is never confirmed, logged "
+                              "as valid, or spotted. QRZ cannot save us here: "
+                              "a bare 3-char candidate is the shortest shape a "
+                              "callsign can take and so the most likely to "
+                              "coincidentally match a real but unrelated "
+                              "station — K5I and K5D, torn out of noisy "
+                              "transcripts, both validated against real hams "
+                              "who were never on the air.")
     extract.add_argument("--min-extract-confidence", type=float, default=0.4,
                          help="Discard candidates below this heuristic confidence")
     extract.add_argument("--max-candidates", type=int, default=3,
@@ -1187,16 +1200,6 @@ def parse_args(argv=None):
                          "estimate does not restart the tally, and the count "
                          "is never reset — a station that has proved itself "
                          "does not have to prove it again after the cooldown.")
-    dx.add_argument("--spot-min-length", type=int, default=4,
-                    help="Minimum character length required before a "
-                         "phonetically-assembled callsign is spotted "
-                         "(default 4; literal verbatim matches are exempt). "
-                         "QRZ validation alone isn't enough: a bare 3-char "
-                         "candidate (the shortest possible callsign shape) "
-                         "torn out of a noisy transcript can coincidentally "
-                         "match a real but unrelated callsign. Shorter "
-                         "candidates are still shown/logged, just not "
-                         "pushed to the public cluster.")
 
     web = parser.add_argument_group("web ui")
     web.add_argument("--web-port", type=int, default=6098,
