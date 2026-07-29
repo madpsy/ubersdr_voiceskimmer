@@ -4,7 +4,7 @@ Hops around detected voice activity, feeds each frequency to the Whisper
 speech-to-text extension, extracts candidate callsigns from the transcript, and
 validates every one against QRZ. Optionally submits confirmed callsigns as real
 DX spots. A live dashboard (transcript, confirmed callsigns, band/freq
-activity, DX spots) is built in — see [Docker / Deployment](#7-docker--deployment)
+activity, DX spots) is built in — see [Docker / Deployment](#8-docker--deployment)
 to run it as a container alongside UberSDR, or `--web-port` when running from
 source.
 
@@ -215,7 +215,112 @@ A full roaming scan across every band, with spot submission on:
   --progress-interval 180 --output full-scan.jsonl
 ```
 
-## 6. Tests
+## 6. HTTP API
+
+The dashboard's own endpoints are documented here too, but `GET /api/spots` is
+the one meant for other programs: every confirmed sighting, with everything
+known about it, filterable.
+
+A record is one **callsign on one frequency**. The same station heard on two
+bands is two records — that is also how corroboration and the re-spot cooldown
+are counted, so `hits` always means "on this frequency".
+
+```bash
+# everything
+curl 'http://localhost:6098/api/spots'
+
+# only what was actually submitted to the cluster, in the last 5 minutes
+curl 'http://localhost:6098/api/spots?submitted=true&last=5m'
+
+# 20m and 40m, heard at least twice, strongest first
+curl 'http://localhost:6098/api/spots?band=20m,40m&min_hits=2&sort=snr'
+
+# just the fields a logger needs
+curl 'http://localhost:6098/api/spots?fields=callsign,frequency,band,submitted_at_iso'
+```
+
+### Filters
+
+All optional; combining them narrows (AND). An unknown or malformed value is
+a **400 with a reason**, never an empty list — a filter API that answers a
+typo with `[]` reads as "nothing matched", which is the most misleading thing
+it could do.
+
+| Parameter | Meaning |
+| --- | --- |
+| `last` | Relative window: `30s`, `5m`, `2h`, `1d`, `1w`. A bare number is seconds. |
+| `since`, `until` | Absolute window, unix seconds. |
+| `time_field` | Which timestamp the window applies to: `last_heard` (default), `first_heard`, `submitted_at`. |
+| `submitted` | `true` = only what went to the DX cluster, `false` = only what did not. |
+| `band` | Comma list, e.g. `20m,40m`. |
+| `mode` | Comma list, e.g. `usb,lsb`. |
+| `callsign` | Comma list, exact match. |
+| `country`, `country_code` | Comma list. `country_code` is ISO 3166-1 alpha-2. |
+| `min_freq`, `max_freq` | Hz. |
+| `min_hits` | Times heard on that frequency. |
+| `min_snr` | dB at the time it was heard. |
+| `min_confidence` | Extractor confidence, 0–1. |
+| `dx_agree` | `true` = only those matching a DX cluster spot on the same frequency. |
+| `q` | Free text over callsign, name, country, band, grid, spot comment and the transcript it came from. |
+| `sort` | `last_heard` (default), `first_heard`, `submitted_at`, `callsign`, `band`, `frequency`, `hits`, `snr`, `country`, `confidence`. |
+| `order` | `desc` (default) or `asc`. |
+| `limit`, `offset` | Default 500, capped at 5000. |
+| `fields` | Comma list to trim the response to just those fields. |
+
+Rate limited to **one request per second per address**, same as
+`/api/explain`, with its own separate budget. Over the limit is a `429` with
+`Retry-After`.
+
+### Response
+
+`total` is everything held, `matched` is how many passed the filters, `count`
+is how many are in this page.
+
+```json
+{
+  "generated_at": 1785332908.677, "generated_at_iso": "2026-07-29T13:48:28Z",
+  "total": 4, "matched": 1, "count": 1, "offset": 0, "limit": 500,
+  "spots": [{
+    "callsign": "G0VIM", "key": "G0VIM|14226000",
+    "band": "20m", "frequency": 14226000, "frequency_mhz": 14.226, "mode": "USB",
+    "first_heard": 1785332850.5, "first_heard_iso": "2026-07-29T13:47:30Z",
+    "last_heard": 1785332850.5,  "last_heard_iso": "2026-07-29T13:47:30Z",
+    "hits": 4,
+    "submitted": true, "submitted_at": 1785332880.5,
+    "submitted_at_iso": "2026-07-29T13:48:00Z", "spot_comment": "[Voice] Malcolm",
+    "name": "Malcolm", "country": "England", "country_code": "GB",
+    "grid": "IO92", "latitude": 52.2, "longitude": -0.9,
+    "lookup_summary": "Malcolm - England",
+    "snr": 42.1, "activity_confidence": 0.8,
+    "source": "phonetic", "extract_confidence": 0.75, "strict_tokens": 3,
+    "cued": true, "candidate": "G0VIM",
+    "heard_text": "this is G0VIM calling CQ",
+    "attribution_certain": true, "straddled_hop": false,
+    "dx_spot": "G0VIM", "agrees_with_dx_spot": true
+  }]
+}
+```
+
+`heard_text` is the transcript line the callsign came out of, and
+`source`/`extract_confidence`/`strict_tokens`/`cued` are how it was extracted —
+together they are the audit trail for a callsign you doubt. `attribution_certain`
+is false when the audio spanned a frequency hop, so the frequency is a best
+guess (see [Frequency attribution](#frequency-attribution)).
+
+State is in memory only: it starts empty on restart, and `--output` remains the
+durable record. Nothing here is authenticated — see the note on exposure in
+[Docker / Deployment](#8-docker--deployment).
+
+### Other endpoints
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/state` | Full dashboard snapshot (workers, transcript tail, confirmed, spots, targets, stats). |
+| `GET /api/events` | SSE stream of incremental updates. |
+| `POST /api/explain` | Why a transcript line did or did not yield a callsign. Body `{"text": "..."}`. Rate limited 1/s per address. |
+| `GET /api/audio/<worker>` | Live audio from that worker, WebM/Opus. |
+
+## 7. Tests
 
 ```bash
 .venv/bin/python -m pytest -q     # or: python -m unittest discover -p 'test_*.py'
@@ -239,7 +344,7 @@ call placed above a `let` declaration hit its temporal dead zone and took the
 whole page down with `can't access lexical declaration 'map' before
 initialization`.
 
-## 7. Docker / Deployment
+## 8. Docker / Deployment
 
 Packaged the same way as the other [ubersdr addons](https://ubersdr.org) —
 a container that runs alongside UberSDR, joined to its `sdr-network`, and

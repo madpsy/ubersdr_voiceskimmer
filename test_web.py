@@ -14,7 +14,7 @@ import time
 import unittest
 
 from lookup import CallsignValidator
-from web import RateLimiter, WebUI, client_ip
+from web import QueryError, RateLimiter, WebUI, client_ip, parse_duration
 
 
 class FakeRequest:
@@ -186,6 +186,172 @@ class TestExplainEndpoint(unittest.TestCase):
         # polls /api/state on load and must not be throttled with it.
         for _ in range(5):
             self.assertEqual(self.client.get("/api/state").status_code, 200)
+
+
+class TestParseDuration(unittest.TestCase):
+    def test_units(self):
+        self.assertEqual(parse_duration("30s"), 30)
+        self.assertEqual(parse_duration("5m"), 300)
+        self.assertEqual(parse_duration("2h"), 7200)
+        self.assertEqual(parse_duration("1d"), 86400)
+        self.assertEqual(parse_duration("90"), 90)      # bare number is seconds
+
+    def test_rejects_junk_rather_than_defaulting(self):
+        # A typo silently becoming 0 would widen the window to everything --
+        # the opposite of what the caller asked for.
+        for bad in ["5min", "", "abc", "-5m", "5 5m", None]:
+            with self.assertRaises(QueryError, msg=repr(bad)):
+                parse_duration(bad)
+
+
+class TestSpotQuery(unittest.TestCase):
+    """
+    /api/spots is a documented contract, so these pin the filters and the
+    error behaviour rather than the internals behind them.
+    """
+
+    def setUp(self):
+        self.ui = WebUI(workers=1)
+        self.client = self.ui.app.test_client()
+        self.now = time.time()
+        rows = [
+            # call, band, hz, country, cc, age, submitted, dx_agree, hits, snr
+            ("G0VIM", "20m", 14226000, "England", "GB", 30, True, True, 4, 42.1),
+            ("DL2BHM", "20m", 14188000, "Germany", "DE", 120, True, False, 3, 39.5),
+            ("JA1ABC", "15m", 21255000, "Japan", "JP", 600, False, False, 1, 35.0),
+            ("EA5XX", "40m", 7155000, "Spain", "ES", 3600, False, False, 2, 44.2),
+        ]
+        for call, band, hz, ctry, cc, age, sub, dxa, hits, snr in rows:
+            for _ in range(hits):
+                self.ui.push_confirmed({
+                    "normalised": call, "band": band, "frequency": hz, "mode": "usb",
+                    "name": "N", "country": ctry, "country_code": cc,
+                    "timestamp": self.now - age, "snr": snr,
+                    "agrees_with_dx_spot": dxa, "raw_text": f"this is {call}",
+                    "extract_confidence": 0.75,
+                }, False, hz)
+            if sub:
+                self.ui.push_spot(call, hz, "[Voice] N", hz, band, cc, ctry)
+
+    def get(self, query=""):
+        # A distinct address per call: the endpoint allows one request per
+        # second per address and these tests fire many in a row.
+        self._n = getattr(self, "_n", 0) + 1
+        r = self.client.get(
+            "/api/spots?" + query,
+            headers={"X-Real-IP": f"198.51.100.{self._n % 250}"},
+        )
+        return r.status_code, r.get_json()
+
+    def calls(self, query=""):
+        status, body = self.get(query)
+        self.assertEqual(status, 200, body)
+        return [s["callsign"] for s in body["spots"]]
+
+    def test_returns_everything_by_default(self):
+        self.assertEqual(sorted(self.calls()), ["DL2BHM", "EA5XX", "G0VIM", "JA1ABC"])
+
+    def test_submitted_filter(self):
+        self.assertEqual(sorted(self.calls("submitted=true")), ["DL2BHM", "G0VIM"])
+        self.assertEqual(sorted(self.calls("submitted=false")), ["EA5XX", "JA1ABC"])
+
+    def test_relative_time_window(self):
+        self.assertEqual(sorted(self.calls("last=5m")), ["DL2BHM", "G0VIM"])
+        self.assertEqual(sorted(self.calls("last=1m")), ["G0VIM"])
+        self.assertEqual(len(self.calls("last=2h")), 4)
+
+    def test_filters_combine(self):
+        self.assertEqual(self.calls("last=5m&submitted=true&band=20m"),
+                         ["G0VIM", "DL2BHM"])
+
+    def test_band_and_country_lists(self):
+        self.assertEqual(sorted(self.calls("band=15m,40m")), ["EA5XX", "JA1ABC"])
+        self.assertEqual(sorted(self.calls("country_code=gb,de")), ["DL2BHM", "G0VIM"])
+
+    def test_numeric_filters(self):
+        self.assertEqual(sorted(self.calls("min_hits=3")), ["DL2BHM", "G0VIM"])
+        self.assertEqual(sorted(self.calls("min_snr=42")), ["EA5XX", "G0VIM"])
+        self.assertEqual(
+            sorted(self.calls("min_freq=14000000&max_freq=14350000")),
+            ["DL2BHM", "G0VIM"],
+        )
+
+    def test_dx_agreement(self):
+        self.assertEqual(self.calls("dx_agree=true"), ["G0VIM"])
+
+    def test_free_text_searches_heard_text_too(self):
+        self.assertEqual(self.calls("q=JA1ABC"), ["JA1ABC"])
+        self.assertEqual(len(self.calls("q=this is")), 4)
+
+    def test_sort_and_order(self):
+        self.assertEqual(self.calls("sort=callsign&order=asc"),
+                         ["DL2BHM", "EA5XX", "G0VIM", "JA1ABC"])
+        self.assertEqual(self.calls("sort=snr&order=desc")[0], "EA5XX")
+
+    def test_pagination_reports_the_unpaged_total(self):
+        status, body = self.get("limit=2")
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(body["matched"], 4)
+        self.assertEqual(body["total"], 4)
+        first = self.calls("limit=2")
+        second = self.calls("limit=2&offset=2")
+        self.assertEqual(len(set(first) & set(second)), 0)
+
+    def test_limit_is_capped_server_side(self):
+        status, body = self.get("limit=999999")
+        self.assertEqual(status, 200)
+        self.assertLessEqual(body["limit"], 5000)
+
+    def test_field_projection(self):
+        status, body = self.get("fields=callsign,band")
+        self.assertEqual(status, 200)
+        self.assertEqual(set(body["spots"][0]), {"callsign", "band"})
+
+    def test_submitted_window_uses_the_submission_time(self):
+        # DL2BHM was last heard 120s ago but spotted just now, so a
+        # submitted_at window of 1m includes it while a last_heard one does not.
+        self.assertIn("DL2BHM", self.calls("time_field=submitted_at&last=1m"))
+        self.assertNotIn("DL2BHM", self.calls("last=1m"))
+
+    def test_record_carries_the_full_detail(self):
+        status, body = self.get("callsign=G0VIM")
+        rec = body["spots"][0]
+        for field in ("callsign", "band", "frequency", "frequency_mhz", "mode",
+                      "first_heard_iso", "last_heard_iso", "hits", "submitted",
+                      "submitted_at_iso", "spot_comment", "country_code",
+                      "snr", "source", "extract_confidence", "heard_text",
+                      "agrees_with_dx_spot"):
+            self.assertIn(field, rec)
+        self.assertTrue(rec["submitted"])
+        self.assertEqual(rec["spot_comment"], "[Voice] N")
+
+    def test_rate_limited_per_address(self):
+        c = self.client
+        self.assertEqual(
+            c.get("/api/spots", headers={"X-Real-IP": "203.0.113.90"}).status_code, 200)
+        r = c.get("/api/spots", headers={"X-Real-IP": "203.0.113.90"})
+        self.assertEqual(r.status_code, 429)
+        self.assertEqual(r.headers["Retry-After"], "1")
+        self.assertEqual(
+            c.get("/api/spots", headers={"X-Real-IP": "203.0.113.91"}).status_code, 200)
+
+    def test_its_budget_is_separate_from_explain(self):
+        # Spending the spots budget must not lock the caller out of an
+        # explanation.
+        c, ip = self.client, {"X-Real-IP": "203.0.113.92"}
+        self.assertEqual(c.get("/api/spots", headers=ip).status_code, 200)
+        self.assertEqual(
+            c.post("/api/explain", json={"text": "hi"}, headers=ip).status_code, 200)
+        self.assertEqual(c.get("/api/spots", headers=ip).status_code, 429)
+
+    def test_bad_parameters_are_400_not_an_empty_list(self):
+        # Answering a typo with [] reads as "nothing matched", which is the
+        # most misleading thing a filter API can do.
+        for bad in ["last=5min", "submitted=maybe", "sort=bogus", "order=sideways",
+                    "fields=nope", "min_hits=abc", "time_field=whenever"]:
+            status, body = self.get(bad)
+            self.assertEqual(status, 400, f"{bad} -> {status}")
+            self.assertIn("error", body)
 
 
 class TestCountryCode(unittest.TestCase):

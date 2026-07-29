@@ -31,14 +31,16 @@ import json
 import logging
 import math
 import queue
+import re
 import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 from flask import Flask, Response, jsonify, request
+from werkzeug.serving import make_server
 
 from phonetics import explain
 
@@ -69,6 +71,53 @@ def client_ip(req) -> str:
     if xff:
         return xff.split(",")[0].strip()
     return req.remote_addr or "unknown"
+
+
+class QueryError(ValueError):
+    """A bad query parameter. Carries the message shown to the caller."""
+
+
+_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhdw]?)$", re.IGNORECASE)
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def parse_duration(value: str) -> float:
+    """
+    "5m" / "30s" / "2h" / "1d" / "90" (bare number is seconds) -> seconds.
+
+    Rejects anything else rather than silently treating it as zero, which
+    would turn a typo like "5min" into "everything since the epoch" — the
+    opposite of what was asked for.
+    """
+    match = _DURATION_RE.match((value or "").strip())
+    if not match:
+        raise QueryError(
+            f"invalid duration {value!r} — use e.g. 30s, 5m, 2h, 1d "
+            "(a bare number is seconds)"
+        )
+    amount, unit = match.groups()
+    return float(amount) * _DURATION_UNITS[(unit or "s").lower()]
+
+
+def parse_bool(value: str, name: str) -> bool:
+    lowered = (value or "").strip().lower()
+    if lowered in ("1", "true", "yes", "on"):
+        return True
+    if lowered in ("0", "false", "no", "off"):
+        return False
+    raise QueryError(f"invalid boolean for {name}: {value!r} — use true or false")
+
+
+def parse_number(value: str, name: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise QueryError(f"invalid number for {name}: {value!r}")
+
+
+def csv_set(value: str) -> Set[str]:
+    """Comma-separated list -> lowercased set, blanks dropped."""
+    return {part.strip().lower() for part in (value or "").split(",") if part.strip()}
 
 
 class RateLimiter:
@@ -114,7 +163,6 @@ class RateLimiter:
             oldest = sorted(self._last, key=lambda k: self._last[k])
             for key in oldest[: len(oldest) // 2]:
                 del self._last[key]
-from werkzeug.serving import make_server
 
 log = logging.getLogger(__name__)
 
@@ -253,7 +301,11 @@ class WebUI:
         # /api/explain is the one endpoint that does real work on
         # caller-supplied input, so it is the one worth pacing. The rest
         # serve state the scanner has already computed.
+        # One budget per endpoint rather than one shared across both: they
+        # answer different questions, and a dashboard fetching an explanation
+        # should not lock the caller out of the spot query for a second.
         self.explain_limiter = RateLimiter(interval=1.0)
+        self.spots_limiter = RateLimiter(interval=1.0)
 
         # Everything a single scanning session owns is keyed by worker id.
         # Confirmed callsigns, spots and stats stay shared — they are results,
@@ -342,6 +394,28 @@ class WebUI:
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
+        @app.route("/api/spots")
+        def api_spots():
+            """
+            Every confirmed sighting, filtered. Documented in README.md.
+
+            Rate limited to one request per second per address, like
+            /api/explain: it accepts caller-supplied filters and can return a
+            large response, so it is not in the same class as the dashboard's
+            own /api/state poll. `limit` is capped server-side too, so a
+            single request cannot ask for an unbounded response.
+            """
+            limited = self._too_many(self.spots_limiter)
+            if limited is not None:
+                return limited
+            try:
+                return jsonify(self.query_spots(request.args))
+            except QueryError as exc:
+                # 400 with the reason: a filter API that answers a typo with
+                # an empty list is worse than useless, because the caller
+                # reads it as "nothing matched".
+                return jsonify({"error": str(exc)}), 400
+
         @app.route("/api/explain", methods=["POST"])
         def api_explain():
             """
@@ -353,18 +427,9 @@ class WebUI:
             transcript line is arbitrary user-visible text that has no
             business in a URL or an access log.
             """
-            allowed, retry_after = self.explain_limiter.allow(client_ip(request))
-            if not allowed:
-                resp = jsonify({
-                    "error": "rate limited — one analysis per second",
-                    "retry_after": round(retry_after, 2),
-                })
-                resp.status_code = 429
-                # Whole seconds: RFC 9110 delay-seconds is an integer, and
-                # rounding up rather than down avoids sending the client
-                # straight back into another rejection.
-                resp.headers["Retry-After"] = str(math.ceil(retry_after)) or "1"
-                return resp
+            limited = self._too_many(self.explain_limiter)
+            if limited is not None:
+                return limited
 
             payload = request.get_json(silent=True) or {}
             text = payload.get("text", "")
@@ -421,6 +486,263 @@ class WebUI:
             )
 
         return app
+
+    # -- Rate limiting ----------------------------------------------------
+
+    @staticmethod
+    def _too_many(limiter: RateLimiter) -> Optional[Response]:
+        """
+        A 429 if this caller is over its budget, else None.
+
+        Shared by the endpoints that take caller-supplied queries. The
+        address comes from client_ip(), which trusts the addon proxy's
+        headers — see the note there about direct exposure.
+        """
+        allowed, retry_after = limiter.allow(client_ip(request))
+        if allowed:
+            return None
+        resp = jsonify({
+            "error": "rate limited — one request per second",
+            "retry_after": round(retry_after, 2),
+        })
+        resp.status_code = 429
+        # RFC 9110 delay-seconds is an integer, and rounding up avoids
+        # sending the client straight back into another rejection. Floored
+        # at 1 so a sub-second wait never advertises itself as "0".
+        resp.headers["Retry-After"] = str(max(1, math.ceil(retry_after)))
+        return resp
+
+    # -- Spot query -------------------------------------------------------
+
+    # Sortable keys, mapped to the record field they read. Restricted to a
+    # known set so `sort` cannot be used to probe the record shape.
+    _SORT_KEYS = {
+        "last_heard": "last_heard", "time": "last_heard",
+        "first_heard": "first_heard",
+        "submitted_at": "submitted_at",
+        "callsign": "callsign",
+        "band": "band",
+        "frequency": "frequency", "freq": "frequency",
+        "hits": "hits",
+        "snr": "snr",
+        "country": "country",
+        "confidence": "extract_confidence",
+    }
+
+    @staticmethod
+    def _record(entry: Dict[str, Any], comment: str) -> Dict[str, Any]:
+        """
+        One confirmed sighting, as the API presents it.
+
+        Built field by field rather than returned raw so the response is a
+        contract rather than a window onto whatever the scanner's Detection
+        dataclass happens to hold this week. Timestamps are given as both
+        unix seconds and ISO-8601 UTC — the first is what you filter and
+        sort on, the second is what you read.
+        """
+        def iso(ts):
+            if not ts:
+                return None
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+        freq = entry.get("frequency") or 0
+        spotted_at = entry.get("spotted_at")
+        return {
+            # identity
+            "callsign": entry.get("normalised", ""),
+            "key": entry.get("key", ""),
+            # where
+            "band": entry.get("band", ""),
+            "frequency": freq,
+            "frequency_mhz": round(freq / 1e6, 6) if freq else 0,
+            "mode": (entry.get("mode") or "").upper(),
+            # when
+            "first_heard": entry.get("first_seen"),
+            "first_heard_iso": iso(entry.get("first_seen")),
+            "last_heard": entry.get("timestamp"),
+            "last_heard_iso": iso(entry.get("timestamp")),
+            "hits": entry.get("hit_count", 1),
+            # submission
+            "submitted": bool(spotted_at),
+            "submitted_at": spotted_at,
+            "submitted_at_iso": iso(spotted_at),
+            "spot_comment": comment,
+            # who — from the QRZ/CTY lookup
+            "name": entry.get("name", ""),
+            "country": entry.get("country", ""),
+            "country_code": entry.get("country_code", ""),
+            "grid": entry.get("grid", ""),
+            "latitude": entry.get("latitude"),
+            "longitude": entry.get("longitude"),
+            "lookup_summary": entry.get("lookup_summary", ""),
+            # signal at the time it was heard
+            "snr": entry.get("snr"),
+            "activity_confidence": entry.get("activity_confidence"),
+            # how it was extracted — the audit trail for a doubtful callsign
+            "source": entry.get("source", ""),
+            "extract_confidence": entry.get("extract_confidence"),
+            "strict_tokens": entry.get("strict_tokens"),
+            "cued": entry.get("cued"),
+            "candidate": entry.get("candidate", ""),
+            "heard_text": entry.get("raw_text", ""),
+            "attribution_certain": entry.get("attribution_certain", True),
+            "straddled_hop": entry.get("straddled_hop", False),
+            # corroboration against the DX cluster's own spots
+            "dx_spot": entry.get("dx_spot", ""),
+            "agrees_with_dx_spot": entry.get("agrees_with_dx_spot", False),
+        }
+
+    def query_spots(self, args) -> Dict[str, Any]:
+        """
+        Filtered view of every confirmed sighting. See README for the
+        parameter reference. Raises QueryError on a bad parameter.
+        """
+        now = time.time()
+        with self._lock:
+            entries = list(self._confirmed.values())
+            comments = {s.get("key", ""): s.get("comment", "") for s in self._spots}
+
+        records = [self._record(e, comments.get(e.get("key", ""), "")) for e in entries]
+        total = len(records)
+
+        get = args.get
+
+        # -- time window --
+        since = None
+        if get("last") is not None:
+            since = now - parse_duration(get("last"))
+        if get("since") is not None:
+            since = parse_number(get("since"), "since")
+        until = parse_number(get("until"), "until") if get("until") is not None else None
+
+        # Which timestamp the window applies to. Filtering submissions by when
+        # the station was last heard would be surprising — a station heard
+        # again after being spotted would drift in and out of a submitted
+        # query — so the window follows whichever event the caller is asking
+        # about.
+        time_field = get("time_field", "last_heard")
+        if time_field not in ("last_heard", "first_heard", "submitted_at"):
+            raise QueryError(
+                f"invalid time_field {time_field!r} — use last_heard, "
+                "first_heard or submitted_at"
+            )
+
+        def in_window(r):
+            ts = r.get(time_field)
+            if ts is None:
+                return since is None and until is None
+            if since is not None and ts < since:
+                return False
+            if until is not None and ts > until:
+                return False
+            return True
+
+        records = [r for r in records if in_window(r)]
+
+        # -- attribute filters --
+        if get("submitted") is not None:
+            want = parse_bool(get("submitted"), "submitted")
+            records = [r for r in records if r["submitted"] is want]
+
+        if get("dx_agree") is not None:
+            want = parse_bool(get("dx_agree"), "dx_agree")
+            records = [r for r in records if r["agrees_with_dx_spot"] is want]
+
+        for param, field in (
+            ("band", "band"), ("mode", "mode"), ("callsign", "callsign"),
+            ("country", "country"), ("country_code", "country_code"),
+        ):
+            if get(param) is not None:
+                wanted = csv_set(get(param))
+                if wanted:
+                    records = [
+                        r for r in records if str(r[field] or "").lower() in wanted
+                    ]
+
+        if get("min_freq") is not None:
+            lo = parse_number(get("min_freq"), "min_freq")
+            records = [r for r in records if r["frequency"] >= lo]
+        if get("max_freq") is not None:
+            hi = parse_number(get("max_freq"), "max_freq")
+            records = [r for r in records if r["frequency"] <= hi]
+        if get("min_hits") is not None:
+            need = parse_number(get("min_hits"), "min_hits")
+            records = [r for r in records if (r["hits"] or 0) >= need]
+        if get("min_snr") is not None:
+            need = parse_number(get("min_snr"), "min_snr")
+            records = [r for r in records if (r["snr"] or 0) >= need]
+        if get("min_confidence") is not None:
+            need = parse_number(get("min_confidence"), "min_confidence")
+            records = [
+                r for r in records if (r["extract_confidence"] or 0) >= need
+            ]
+
+        # Free text over the fields a person would actually search by.
+        if get("q"):
+            needle = get("q").strip().lower()
+            records = [
+                r for r in records
+                if needle in " ".join(
+                    str(r[f] or "").lower()
+                    for f in ("callsign", "name", "country", "band", "grid",
+                              "spot_comment", "heard_text")
+                )
+            ]
+
+        # -- sort --
+        sort = get("sort", "last_heard")
+        if sort not in self._SORT_KEYS:
+            raise QueryError(
+                f"invalid sort {sort!r} — one of: "
+                + ", ".join(sorted(self._SORT_KEYS))
+            )
+        order = get("order", "desc").lower()
+        if order not in ("asc", "desc"):
+            raise QueryError(f"invalid order {order!r} — use asc or desc")
+        field = self._SORT_KEYS[sort]
+
+        def sort_key(r):
+            v = r.get(field)
+            # None sorts last in either direction rather than raising on a
+            # str/None comparison — a station with no coordinates or no
+            # submission still has to appear somewhere.
+            if v is None:
+                return (1, "")
+            return (0, v.lower() if isinstance(v, str) else v)
+
+        records.sort(key=sort_key, reverse=(order == "desc"))
+        matched = len(records)
+
+        # -- paginate --
+        offset = int(parse_number(get("offset", "0"), "offset"))
+        limit_raw = get("limit")
+        limit = int(parse_number(limit_raw, "limit")) if limit_raw is not None else 500
+        if offset < 0 or limit < 0:
+            raise QueryError("offset and limit must not be negative")
+        limit = min(limit, 5000)          # a bound the caller cannot lift
+        page = records[offset:offset + limit]
+
+        # -- field projection --
+        if get("fields"):
+            wanted = csv_set(get("fields"))
+            known = set(self._record({}, "").keys())
+            unknown = wanted - known
+            if unknown:
+                raise QueryError(
+                    "unknown field(s): " + ", ".join(sorted(unknown))
+                )
+            page = [{k: v for k, v in r.items() if k.lower() in wanted} for r in page]
+
+        return {
+            "generated_at": now,
+            "generated_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "total": total,        # every confirmed sighting held
+            "matched": matched,    # how many passed the filters
+            "count": len(page),    # how many are in this response
+            "offset": offset,
+            "limit": limit,
+            "spots": page,
+        }
 
     # -- Explanation ------------------------------------------------------
 
