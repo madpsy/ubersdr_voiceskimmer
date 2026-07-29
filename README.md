@@ -178,7 +178,7 @@ callsign and password to log in with.
 | `--spotter-call` | — | Callsign to log in with (required with `--spot`) |
 | `--spotter-pass` | — | DX cluster spot password (required with `--spot`) |
 | `--spot-cooldown` | 900 s | Re-spot the same (callsign, frequency) once this elapses — a station still active later is itself useful information |
-| `--spot-freq-tolerance` | 100 Hz | Frequency tolerance for the cooldown, since the detector's dial-frequency estimate can wobble slightly between hearings |
+| `--spot-freq-tolerance` | 500 Hz | How far apart two hearings can be and still count as the same station. Applies to both the hit count and the cooldown — too tight and one station splits into several, so the hit tally never accumulates |
 | `--spot-max-entries` | 1000 | Cap on remembered cooldown entries, oldest/least-recent evicted first |
 | `--spot-min-hits` | 2 | Decodes of the same callsign on the same frequency required before spotting. Trades latency for confidence — a wrong callsign assembled from one garbled pass is unlikely to be assembled identically again. Set to 1 to spot on the first decode |
 | `--spot-tag` | `[Voice]` | Tag prefixed to every spot comment |

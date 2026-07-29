@@ -31,7 +31,9 @@
 #   SPOTTER_PASS          DX cluster spot password                (required with SPOT)
 #   SPOT_TAG              Tag prefixed to every spot comment      (default: [Voice])
 #   SPOT_COOLDOWN         Seconds before re-spotting the same station (default: 900)
-#   SPOT_FREQ_TOLERANCE   Hz tolerance for the spot cooldown       (default: 100)
+#   SPOT_FREQ_TOLERANCE   Hz tolerance for treating two hearings as the same
+#                         station — applies to both the hit count and the
+#                         cooldown (default: 500)
 #   MIN_CALLSIGN_LENGTH   Minimum length for a phonetically-assembled callsign
 #                         to be looked up at all (default: 4)
 #   SPOT_MIN_HITS         Decodes of the same callsign on the same frequency

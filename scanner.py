@@ -1238,11 +1238,15 @@ def parse_args(argv=None):
                     help="Seconds before the same (callsign, frequency) may "
                          "be spotted again — a station still active later is "
                          "itself useful information. Default 900s (15 min).")
-    dx.add_argument("--spot-freq-tolerance", type=int, default=100,
-                    help="Hz tolerance when matching frequency for the "
-                         "cooldown, since the detector's dial-frequency "
-                         "estimate can wobble slightly between hearings of "
-                         "the same station.")
+    dx.add_argument("--spot-freq-tolerance", type=int, default=500,
+                    help="Hz tolerance when deciding whether two hearings are "
+                         "the same station. Applies to BOTH the corroboration "
+                         "count (--spot-min-hits) and the re-spot cooldown. "
+                         "The detector's dial-frequency estimate wobbles "
+                         "between hearings, and an operator drifting or "
+                         "netting moves further still, so too tight a value "
+                         "splits one station into several and the hit tally "
+                         "never accumulates.")
     dx.add_argument("--spot-max-entries", type=int, default=1000,
                     help="Cap on remembered (callsign, frequency) cooldown "
                          "entries, so a long-running scan can't grow this "

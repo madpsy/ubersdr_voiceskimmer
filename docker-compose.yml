@@ -56,7 +56,11 @@ services:
       # SPOTTER_PASS: ""
       # SPOT_TAG: "[Voice]"
       # SPOT_COOLDOWN: "900"
-      # SPOT_FREQ_TOLERANCE: "100"
+      # Hz tolerance for treating two hearings as the same station. Applies
+      # to both the corroboration count (SPOT_MIN_HITS) and the re-spot
+      # cooldown. Too tight and one station splits into several, so the hit
+      # tally never accumulates.
+      # SPOT_FREQ_TOLERANCE: "500"
       # Minimum callsign length to be looked up at all. Anything shorter is
       # dropped before QRZ, so it is never confirmed, logged as valid, or
       # spotted. Applies however the callsign was recovered, including one
