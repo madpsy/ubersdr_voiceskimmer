@@ -122,6 +122,7 @@
     grid-template-columns: 1fr 1fr;
     gap: 12px;
     padding: 12px;
+    align-items: start;
   }
   @media (max-width: 900px) {
     main { grid-template-columns: 1fr; }
@@ -156,7 +157,7 @@
   .transcript-panel {
     --line-size: 12.5px;
     --line-height: 1.5;
-    --visible-lines: 5;
+    --visible-lines: 10;
     --pad-y: 8px;
   }
   .transcript {
@@ -210,15 +211,20 @@
 
   #spots-panel .scroll, #targets-panel .scroll { max-height: 32vh; }
 
-  /* Transcript panels span the full grid width and split between themselves,
-     so one worker gets the whole row and two sit side by side. */
-  /* Stacked, not side by side: transcript lines are long, so full width
-     matters more than seeing both at once. */
-  #transcripts {
-    grid-column: 1 / -1;
+  /* Transcripts take the left column and the tables the right, so the
+     confirmed callsigns and submitted spots are visible alongside the text
+     rather than pushed below it. Both stack into one column on a narrow
+     window via the media query above.
+
+     Within the left column the transcript panels stack rather than sitting
+     side by side: transcript lines are long, so width matters more than
+     seeing both workers at once. */
+  #transcripts, #side {
     display: grid;
     grid-template-columns: 1fr;
     gap: 12px;
+    align-content: start;
+    min-width: 0;
   }
   .tp-head {
     display: flex;
@@ -266,6 +272,7 @@
        since each is an independent session on its own frequency. -->
   <div id="transcripts"></div>
 
+  <div id="side">
   <section class="panel">
     <h2>Confirmed callsigns</h2>
     <div class="scroll">
@@ -301,6 +308,7 @@
       </table>
     </div>
   </section>
+  </div>
 </main>
 
 <script src="static/app.js"></script>
