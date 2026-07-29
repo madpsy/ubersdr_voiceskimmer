@@ -180,6 +180,64 @@
     );
   }
 
+  // -- Collapsible panels ---------------------------------------------------
+
+  // Which panels the user has collapsed, remembered across reloads — a panel
+  // that reopened itself on every refresh would not be worth collapsing.
+  // Keyed by element id; a panel without one still collapses, it just does
+  // not persist.
+  const COLLAPSE_KEY = "voiceskimmer.collapsed";
+  const collapsed = new Set();
+  try {
+    JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "[]").forEach((id) =>
+      collapsed.add(id)
+    );
+  } catch (err) {
+    /* private browsing, disabled storage, corrupt value — start expanded */
+  }
+
+  function setCollapsed(section, on) {
+    section.classList.toggle("collapsed", on);
+    const btn = section.querySelector(".panel-toggle");
+    if (btn) {
+      btn.setAttribute("aria-expanded", on ? "false" : "true");
+      btn.title = on ? "Expand" : "Collapse";
+    }
+    if (!section.id) return;
+    if (on) collapsed.add(section.id);
+    else collapsed.delete(section.id);
+    try {
+      localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsed]));
+    } catch (err) {
+      /* not being able to remember is not worth breaking the click over */
+    }
+  }
+
+  function restoreCollapsed(section) {
+    if (section && section.id && collapsed.has(section.id)) {
+      setCollapsed(section, true);
+    }
+  }
+
+  // Delegated, so the transcript panels — built later, and rebuilt whenever
+  // the worker count changes — need no wiring of their own.
+  document.addEventListener("click", (e) => {
+    const btn =
+      e.target && e.target.closest && e.target.closest(".panel-toggle");
+    if (!btn) return;
+    const section = btn.closest(".panel");
+    if (section) setCollapsed(section, !section.classList.contains("collapsed"));
+  });
+
+  // The panels present in index.html. Only needed to restore persisted state:
+  // a panel missing from this list still collapses on click, it just opens
+  // again after a reload.
+  function restoreStaticPanels() {
+    for (const id of ["map-panel", "confirmed-panel", "spots-panel", "targets-panel"]) {
+      restoreCollapsed(document.getElementById(id));
+    }
+  }
+
   // -- Per-worker panels -----------------------------------------------------
 
   // Each scanning worker is an independent session on its own frequency, so
@@ -196,8 +254,11 @@
     for (const w of workers) {
       const sec = document.createElement("section");
       sec.className = "panel transcript-panel";
+      // Stable id so a collapsed panel stays collapsed across a reload.
+      sec.id = `transcript-panel-${w.id}`;
       sec.innerHTML =
         `<h2 class="tp-head">` +
+        `<button class="panel-toggle" aria-expanded="true" title="Collapse"></button>` +
         `<span class="tp-dot" title="Whisper connection"></span>` +
         `<span class="tp-label">${many ? `Transcript ${w.id + 1}` : "Live transcript"}</span>` +
         `<span class="tp-current"><span class="empty">waiting for a target…</span></span>` +
@@ -226,6 +287,7 @@
         if (p.listening) setListening(p, false);
       });
       panels.set(w.id, p);
+      restoreCollapsed(sec);
     }
   }
 
@@ -1009,6 +1071,7 @@
   // Everything below runs after every declaration in this file, so nothing
   // here can hit a temporal dead zone. initMap first: loadReceiver places the
   // receiver marker once its fetch resolves.
+  restoreStaticPanels();
   initMap();
   loadReceiver();
 

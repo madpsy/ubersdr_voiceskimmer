@@ -132,13 +132,28 @@ for (const id of ID_LIST) byId[id] = new El("div");
 byId["layer-confirmed"].checked = true;
 byId["layer-spotted"].checked = true;
 
+const docHandlers = {};
 global.document = {
   getElementById: (id) => byId[id] || (byId[id] = new El("div")),
   querySelector: () => new El("tbody"),
   createElement: (t) => new El(t),
-  addEventListener: () => {},
+  // Recorded rather than discarded: the collapse toggles are delegated on
+  // document, so a stub that swallows this cannot test them at all.
+  addEventListener: (type, fn) => {
+    (docHandlers[type] = docHandlers[type] || []).push(fn);
+  },
+};
+global.__fireDocument = (type, ev) => {
+  for (const fn of docHandlers[type] || []) fn(ev);
 };
 global.window = { location: { href: "http://localhost/" } };
+const storage = {};
+global.localStorage = {
+  getItem: (k) => (k in storage ? storage[k] : null),
+  setItem: (k, v) => { storage[k] = String(v); },
+  removeItem: (k) => { delete storage[k]; },
+};
+global.__storage = storage;
 global.EventSource = class {
   constructor() {}
   addEventListener() {}
@@ -314,6 +329,52 @@ check("filters narrow the tables", () => {
   assert.ok(byId["confirmed-filter"].classList.contains("active"));
   byId["confirmed-filter"].value = "";
   T.redrawConfirmed();
+});
+
+check("panels collapse and expand from the title bar", () => {
+  const sec = byId["confirmed-panel"];
+  sec.id = "confirmed-panel";
+  sec.className = "panel";
+  const btn = new El("button");
+  btn.className = "panel-toggle";
+  sec.appendChild(btn);
+  // querySelector on the stub returns a throwaway, so hand back the real
+  // button — setCollapsed updates its aria state.
+  sec.querySelector = () => btn;
+
+  assert.ok(!sec.classList.contains("collapsed"), "starts expanded");
+  global.__fireDocument("click", { target: btn });
+  assert.ok(sec.classList.contains("collapsed"), "did not collapse");
+  global.__fireDocument("click", { target: btn });
+  assert.ok(!sec.classList.contains("collapsed"), "did not expand again");
+});
+
+check("collapsed panels are remembered", () => {
+  const sec = byId["spots-panel"];
+  sec.id = "spots-panel";
+  sec.className = "panel";
+  const btn = new El("button");
+  btn.className = "panel-toggle";
+  sec.appendChild(btn);
+  sec.querySelector = () => btn;
+
+  global.__fireDocument("click", { target: btn });
+  const saved = JSON.parse(global.__storage["voiceskimmer.collapsed"] || "[]");
+  assert.ok(saved.includes("spots-panel"), `not persisted: ${JSON.stringify(saved)}`);
+
+  global.__fireDocument("click", { target: btn });
+  const after = JSON.parse(global.__storage["voiceskimmer.collapsed"] || "[]");
+  assert.ok(!after.includes("spots-panel"), "expanding did not clear it");
+});
+
+check("a click elsewhere does not collapse anything", () => {
+  const sec = byId["targets-panel"];
+  sec.id = "targets-panel";
+  sec.className = "panel";
+  const notAToggle = new El("span");
+  sec.appendChild(notAToggle);
+  global.__fireDocument("click", { target: notAToggle });
+  assert.ok(!sec.classList.contains("collapsed"));
 });
 
 check("clicking a transcript line asks for an explanation", () => {
