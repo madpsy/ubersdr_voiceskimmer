@@ -83,6 +83,13 @@ class Detection:
     lookup_summary: str
     name: str = ""
     country: str = ""
+    grid: str = ""
+    # QRZ carries coordinates for most callsigns; lookup.py falls back to the
+    # DXCC entity centre from CTY when it does not, which is coarse but still
+    # puts the station in the right country. Either way this is optional —
+    # plenty of records have neither, and the map simply omits those.
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     dx_spot: str = ""
     agrees_with_dx_spot: bool = False
     # False when the segment's audio spanned a frequency hop, so the frequency
@@ -983,6 +990,9 @@ class CallsignScanner:
             lookup_summary=result.summary,
             name=result.name,
             country=result.country,
+            grid=result.grid,
+            latitude=result.latitude,
+            longitude=result.longitude,
             dx_spot=target.dx_callsign,
             agrees_with_dx_spot=agrees,
             attribution_certain=attribution.certain,

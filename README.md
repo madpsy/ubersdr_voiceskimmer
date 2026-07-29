@@ -67,10 +67,30 @@ still let a scan run, and the output tells you which flags to add.
 A live dashboard is served on `--web-port` (default `6098`, `0` disables it) —
 open `http://localhost:6098/` while it runs for the transcript, confirmed
 callsigns, band/freq activity, and DX spots submitted, updating in real time.
+Rows and transcript lines are tinted by band, and the confirmed and spots
+tables each carry a free-text filter over callsign, frequency and name.
 
 The dashboard's **🔈 Listen** button plays the audio the scanner is currently
 hearing, following it as it hops. See
 [Audio preview](#how-the-audio-preview-works) for what it does server-side.
+
+**Click any completed transcript line** to see what the extractor made of it:
+what each word mapped to, which runs were assembled, the evidence each scored
+against the gate, and which gate a candidate died at. This is the fastest way
+to work out why an obvious callsign produced nothing. It is served by
+`POST /api/explain`, which makes no QRZ lookup and is rate limited to one
+request per second per address.
+
+The **map** plots stations against the receiver, using the coordinates QRZ
+returns (falling back to the DXCC entity centre from CTY). Confirmed and
+spotted stations are separate layers, both on by default — a spotted callsign
+is necessarily a confirmed one, so they partition rather than overlap, and
+turning off *Confirmed* answers "what did I actually submit". One marker per
+callsign however many bands it was heard on; hover it for the bands,
+frequencies and whether each was spotted. Stations QRZ has no coordinates for
+are counted under the map rather than silently dropped. Map tiles are fetched
+from CARTO, so the map is blank without internet access — nothing else on the
+dashboard depends on it.
 
 Stop with Ctrl-C; it drains the transcription pipeline and prints a summary.
 

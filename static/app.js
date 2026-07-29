@@ -251,9 +251,15 @@
           (rx.callsign && bits.length ? '<span class="sep">·</span>' : "") +
           bits.join('<span class="sep">·</span>');
         if (rx.callsign) document.title = `${rx.callsign} — Voice Skimmer`;
+        const gps = rx.gps || {};
+        setInstanceLocation(
+          gps.lat, gps.lon,
+          [rx.callsign, rx.location].filter(Boolean).join(" · ")
+        );
       })
       .catch(() => {});   // not fatal; the dashboard is fine without it
   }
+  initMap();
   loadReceiver();
 
   // -- Live signal ----------------------------------------------------------
@@ -394,6 +400,168 @@
     p.liveLine.className = ("partial " + bandClass(entry.band)).trim();
     p.liveLine.innerHTML = lineHTML(entry, "…");
     if (atBottom) p.scroll.scrollTop = p.scroll.scrollHeight;
+  }
+
+  // -- Map ------------------------------------------------------------------
+
+  // One marker per CALLSIGN, not per confirmed row: the same station heard on
+  // two bands is one place on the earth, and stacking two markers on the same
+  // coordinates would hide one behind the other. The bands and frequencies it
+  // was heard on go in the tooltip instead.
+  //
+  // A spotted callsign is necessarily also a confirmed one, so the two layers
+  // partition rather than overlap — a marker belongs to "Spotted" once any of
+  // its sightings has gone to the cluster, and to "Confirmed" until then.
+  // Both on shows everything exactly once; Confirmed alone hides what has
+  // already been spotted; Spotted alone answers "what did I actually submit".
+
+  let map = null;
+  let layerConfirmed = null;
+  let layerSpotted = null;
+  let instanceMarker = null;
+  let mapRedrawQueued = false;
+
+  function initMap() {
+    if (map || typeof L === "undefined" || !document.getElementById("map")) return;
+    map = L.map("map", {
+      worldCopyJump: true,          // dragging past the antimeridian keeps markers
+      zoomControl: true,
+    }).setView([20, 0], 1);
+
+    L.tileLayer(
+      "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+      {
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' +
+          ' &copy; <a href="https://carto.com/attributions">CARTO</a>',
+        maxZoom: 18,
+      }
+    ).addTo(map);
+
+    layerConfirmed = L.layerGroup().addTo(map);
+    layerSpotted = L.layerGroup().addTo(map);
+
+    const bind = (input, layer) => {
+      if (!input) return;
+      input.addEventListener("change", () => {
+        if (input.checked) layer.addTo(map);
+        else map.removeLayer(layer);
+        updateMapNote();
+      });
+    };
+    bind(document.getElementById("layer-confirmed"), layerConfirmed);
+    bind(document.getElementById("layer-spotted"), layerSpotted);
+  }
+
+  // Groups confirmed rows by callsign. Coordinates come from QRZ via the
+  // scanner; plenty of records carry none, and those stations simply have no
+  // marker — reported in the note under the map so their absence is not
+  // mistaken for a bug.
+  function mapStations() {
+    const byCall = new Map();
+    for (const d of confirmed.values()) {
+      if (typeof d.latitude !== "number" || typeof d.longitude !== "number") continue;
+      let s = byCall.get(d.normalised);
+      if (!s) {
+        s = {
+          call: d.normalised, lat: d.latitude, lon: d.longitude,
+          name: d.name || "", country: d.country || "",
+          spotted: false, rows: [],
+        };
+        byCall.set(d.normalised, s);
+      }
+      if (d.spotted_at) s.spotted = true;
+      s.rows.push({
+        band: d.band, freq: d.frequency,
+        spotted_at: d.spotted_at || null, last: d.timestamp,
+      });
+    }
+    return byCall;
+  }
+
+  function tooltipHTML(s) {
+    const who = [s.name, s.country].filter(Boolean).join(", ");
+    const rows = s.rows
+      .slice()
+      .sort((a, b) => (b.last || 0) - (a.last || 0))
+      .map((r) => {
+        const what = r.spotted_at
+          ? `<span class="sp">spotted ${fmtTime(r.spotted_at)}</span>`
+          : '<span class="cf">confirmed</span>';
+        return `<div>${esc(r.band || "")} ${fmtFreq(r.freq)} · ${what}</div>`;
+      })
+      .join("");
+    return (
+      `<div class="map-tip"><span class="call">${esc(s.call)}</span>` +
+      (who ? ` <span class="who">${esc(who)}</span>` : "") +
+      `<div class="rows">${rows}</div></div>`
+    );
+  }
+
+  function redrawMap() {
+    if (!map) return;
+    layerConfirmed.clearLayers();
+    layerSpotted.clearLayers();
+
+    for (const s of mapStations().values()) {
+      const marker = L.circleMarker([s.lat, s.lon], {
+        radius: 5,
+        weight: 2,
+        color: s.spotted ? "#e3b341" : "#58a6ff",
+        fillColor: s.spotted ? "#e3b341" : "#58a6ff",
+        fillOpacity: 0.55,
+      });
+      marker.bindTooltip(tooltipHTML(s), { direction: "top", opacity: 1 });
+      marker.addTo(s.spotted ? layerSpotted : layerConfirmed);
+    }
+    updateMapNote();
+  }
+
+  // Coalesced: replaying a snapshot calls this once per confirmed row, and
+  // rebuilding every marker each time would be wasted work before the browser
+  // has painted any of them.
+  function scheduleMapRedraw() {
+    if (mapRedrawQueued || !map) return;
+    mapRedrawQueued = true;
+    requestAnimationFrame(() => {
+      mapRedrawQueued = false;
+      redrawMap();
+    });
+  }
+
+  function updateMapNote() {
+    const note = document.getElementById("map-note");
+    if (!note) return;
+    const placed = mapStations().size;
+    const calls = new Set([...confirmed.values()].map((d) => d.normalised));
+    const missing = calls.size - placed;
+    const bits = [`${placed} station${placed === 1 ? "" : "s"} placed`];
+    if (missing > 0) bits.push(`${missing} without coordinates in QRZ`);
+    note.textContent = bits.join(" · ");
+  }
+
+  function setInstanceLocation(lat, lon, label) {
+    if (!map || typeof lat !== "number" || typeof lon !== "number") return;
+    // 0,0 is what an unconfigured GPS block reports, and it is in the Gulf of
+    // Guinea — a receiver is never actually there.
+    if (lat === 0 && lon === 0) return;
+    if (instanceMarker) map.removeLayer(instanceMarker);
+    instanceMarker = L.circleMarker([lat, lon], {
+      radius: 7,
+      weight: 2,
+      color: "#3fb950",
+      fillColor: "#3fb950",
+      fillOpacity: 0.9,
+    })
+      .bindTooltip(
+        `<div class="map-tip"><span class="call">${esc(label || "Receiver")}</span>` +
+        '<div class="rows"><div class="cf">this instance</div></div></div>',
+        { direction: "top", opacity: 1 }
+      )
+      .addTo(map);
+    // Centre on the receiver: the stations it hears are mostly around it, and
+    // a world view at zoom 1 puts it nowhere in particular.
+    map.setView([lat, lon], 3);
   }
 
   // -- Explain modal --------------------------------------------------------
@@ -580,6 +748,7 @@
   function renderConfirmedRow(det) {
     confirmed.set(det.key, det);
     redrawConfirmed();
+    scheduleMapRedraw();
   }
 
   function redrawConfirmed() {
@@ -636,6 +805,8 @@
     if (!d || d.spotted_at) return;
     d.spotted_at = spot.time;
     redrawConfirmed();
+    // The marker moves from the Confirmed layer to the Spotted one.
+    scheduleMapRedraw();
   }
 
   function renderSpotRow(spot) {
@@ -788,6 +959,7 @@
     confirmed.clear();
     (state.confirmed || []).forEach((d) => confirmed.set(d.key, d));
     redrawConfirmed();
+    scheduleMapRedraw();
     // Snapshot spots arrive oldest-first and renderSpotRow unshifts each to
     // the front, so replaying them in order leaves the newest at the top —
     // matching how live spots land. Reversing here as well would flip it back

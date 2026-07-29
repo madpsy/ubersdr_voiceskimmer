@@ -6,6 +6,10 @@
 <title>UberSDR Voice Skimmer</title>
 <base href="__BASE_PATH__/">
 <link rel="icon" href="data:,">
+<!-- Vendored rather than pulled from a CDN, matching ubersdr_doppler: the
+     addon runs in Docker on networks that may not reach the open internet,
+     and a dashboard that half-loads is worse than one with no map. -->
+<link rel="stylesheet" href="static/leaflet.css">
 <style>
   :root {
     --bg: #0d1117;
@@ -417,7 +421,7 @@
      Within the left column the transcript panels stack rather than sitting
      side by side: transcript lines are long, so width matters more than
      seeing both workers at once. */
-  #transcripts, #side {
+  #left, #transcripts, #side {
     display: grid;
     grid-template-columns: 1fr;
     gap: 12px;
@@ -452,6 +456,67 @@
   .tp-head .tp-current .dx { color: var(--star); }
   .tp-head .tp-current .empty { color: var(--dim); }
   .tp-head .tp-signal { margin-left: auto; }
+
+  /* -- Map ---------------------------------------------------------------- */
+  #map {
+    height: 380px;
+    width: 100%;
+    background: #0d1117;
+  }
+  /* Leaflet ships light-themed chrome; these bring its controls, popups and
+     attribution into the dashboard's palette rather than leaving a white
+     block sitting in a dark page. */
+  .leaflet-container {
+    background: #0d1117;
+    font: inherit;
+    font-size: 12px;
+  }
+  .leaflet-bar a,
+  .leaflet-control-attribution {
+    background: var(--panel);
+    color: var(--dim);
+    border-color: var(--border);
+  }
+  .leaflet-bar a:hover { background: #1c2128; color: var(--text); }
+  .leaflet-control-attribution a { color: var(--dim); }
+  .leaflet-tooltip {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    color: var(--text);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .5);
+    white-space: nowrap;
+  }
+  .leaflet-tooltip::before { border-top-color: var(--border); }
+  .map-tip .call { color: var(--accent); font-weight: 600; }
+  .map-tip .who { color: var(--dim); }
+  .map-tip .rows { margin-top: 3px; }
+  .map-tip .rows div { font-variant-numeric: tabular-nums; }
+  .map-tip .sp { color: var(--star); }
+  .map-tip .cf { color: var(--dim); }
+
+  .map-toggles {
+    margin-left: auto;
+    display: flex;
+    gap: 12px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 11px;
+  }
+  .map-toggles label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    color: var(--dim);
+  }
+  .map-toggles input { margin: 0; cursor: pointer; accent-color: var(--accent); }
+  .map-note {
+    margin: 0;
+    padding: 6px 12px;
+    border-top: 1px solid var(--border);
+    color: var(--dim);
+    font-size: 11px;
+  }
 </style>
 </head>
 <body>
@@ -465,10 +530,26 @@
 <div id="stats"></div>
 
 <main>
-  <!-- One transcript panel per scanning worker, built by app.js from the
-       workers array. Each carries its own frequency, SNR and Listen button,
-       since each is an independent session on its own frequency. -->
-  <div id="transcripts"></div>
+  <!-- The left column. #transcripts is rebuilt wholesale by buildPanels, so
+       the map lives beside it rather than inside it. -->
+  <div id="left">
+    <!-- One transcript panel per scanning worker, built by app.js from the
+         workers array. Each carries its own frequency, SNR and Listen button,
+         since each is an independent session on its own frequency. -->
+    <div id="transcripts"></div>
+
+    <section class="panel" id="map-panel">
+      <h2 class="with-filter">
+        <span>Map</span>
+        <span class="map-toggles">
+          <label><input type="checkbox" id="layer-confirmed" checked> Confirmed</label>
+          <label><input type="checkbox" id="layer-spotted" checked> Spotted</label>
+        </span>
+      </h2>
+      <div id="map"></div>
+      <p class="map-note" id="map-note"></p>
+    </section>
+  </div>
 
   <div id="side">
   <section class="panel" id="confirmed-panel">
@@ -529,6 +610,7 @@
   </div>
 </div>
 
+<script src="static/leaflet.js"></script>
 <script src="static/app.js"></script>
 </body>
 </html>
