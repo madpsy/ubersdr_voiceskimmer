@@ -346,23 +346,30 @@
   tbody tr:hover { background: #1c2128; }
 
   /* -- Band colours ------------------------------------------------------
-     Eight evenly spaced hues, assigned by band in wavelength order and
-     cycling past the eighth (see bandClass in app.js). Every surface that
-     shows a band uses the same class, so one glance tells you a transcript
-     line, a confirmed callsign, a spot and an activity row all belong to
-     the same band without reading any of them.
+     Eight hues assigned by band in wavelength order and cycling past the
+     eighth (see bandClass in app.js). Every surface that shows a band uses
+     the same class, so one glance tells you a transcript line, a confirmed
+     callsign, a spot and an activity row all belong to the same band
+     without reading any of them.
+
+     Deliberately drawn from the cool and neutral range only. Red, orange,
+     amber and green are all spoken for as STATUS in this UI — --bad,
+     --warn, --star and --good, on the connection dots, the spotted badge,
+     the SNR readout and the ✓ marker — so a row tinted with any of them
+     reads as a fault or a success rather than as a band. These are
+     categorical colours and have to look it.
 
      The tints are given literally rather than derived with color-mix so
      the palette renders identically everywhere, and kept faint: they sit
      under text that still has to be comfortably readable. */
   .band-c0 { --band: #58a6ff; --band-bg: rgba( 88, 166, 255, .10); } /* blue */
-  .band-c1 { --band: #a371f7; --band-bg: rgba(163, 113, 247, .10); } /* violet */
-  .band-c2 { --band: #f778ba; --band-bg: rgba(247, 120, 186, .10); } /* pink */
-  .band-c3 { --band: #f85149; --band-bg: rgba(248,  81,  73, .10); } /* red */
-  .band-c4 { --band: #ff9d4d; --band-bg: rgba(255, 157,  77, .10); } /* orange */
-  .band-c5 { --band: #e3b341; --band-bg: rgba(227, 179,  65, .10); } /* gold */
-  .band-c6 { --band: #3fb950; --band-bg: rgba( 63, 185,  80, .10); } /* green */
-  .band-c7 { --band: #39c5cf; --band-bg: rgba( 57, 197, 207, .10); } /* cyan */
+  .band-c1 { --band: #39c5cf; --band-bg: rgba( 57, 197, 207, .10); } /* cyan */
+  .band-c2 { --band: #a371f7; --band-bg: rgba(163, 113, 247, .10); } /* violet */
+  .band-c3 { --band: #f778ba; --band-bg: rgba(247, 120, 186, .10); } /* pink */
+  .band-c4 { --band: #7fb3d5; --band-bg: rgba(127, 179, 213, .10); } /* steel */
+  .band-c5 { --band: #d2a8ff; --band-bg: rgba(210, 168, 255, .10); } /* lilac */
+  .band-c6 { --band: #b08968; --band-bg: rgba(176, 137, 104, .10); } /* tan */
+  .band-c7 { --band: #9aa5b1; --band-bg: rgba(154, 165, 177, .10); } /* slate */
 
   tbody tr[class*="band-c"] { background: var(--band-bg); }
   tbody tr[class*="band-c"] td:first-child {
