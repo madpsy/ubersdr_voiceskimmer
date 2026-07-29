@@ -94,6 +94,7 @@
         transcript: sec.querySelector(".transcript"),
         scroll: sec.querySelector(".scroll"),
         liveLine: null,
+        lastFinalText: null,
         listening: false,
       };
       p.listen.addEventListener("click", () => setListening(p, !p.listening));
@@ -246,6 +247,16 @@
     // carry the worker on the entry itself.
     const p = panel || panelFor(entry);
     if (!p) return;
+
+    // Never render the same text twice in a row. The backend suppresses the
+    // known cause — audio in flight across a frequency hop arriving again
+    // once reset_transcript clears the server's duplicate suppression — but
+    // a repeated line is pure noise however it arises, and reading the same
+    // sentence twice under two different frequencies actively misleads about
+    // where it was heard.
+    if (p.lastFinalText === entry.text) return;
+    p.lastFinalText = entry.text;
+
     const atBottom = scrolledToBottom(p);
 
     const line = document.createElement("div");
@@ -437,6 +448,7 @@
       if (!p) continue;
       p.transcript.innerHTML = "";
       p.liveLine = null;
+      p.lastFinalText = null;
       renderCurrent(w.current ? { ...w.current, worker: w.id } : null);
       (w.transcript || []).forEach((e) => appendTranscript(e, p));
       setLiveTranscript(w.live || null, p);
