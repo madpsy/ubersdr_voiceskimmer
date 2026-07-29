@@ -323,9 +323,11 @@
     (state.confirmed || []).forEach((d) => confirmed.set(d.normalised, d));
     redrawConfirmed();
     els.spotsBody.innerHTML = "";
-    // spots arrive oldest-first in the snapshot; render newest-first to match
-    // the live insertBefore behaviour of renderSpotRow.
-    [...(state.spots || [])].reverse().forEach(renderSpotRow);
+    // Snapshot spots arrive oldest-first and renderSpotRow inserts each at the
+    // top, so replaying them in order leaves the newest at the top — matching
+    // how live spots land. Reversing here as well would flip it back and put
+    // the oldest first on every page load.
+    (state.spots || []).forEach(renderSpotRow);
     renderTargets(state.targets);
     renderSignal(state.signal);
     renderAudioAvailable(!!state.audio_available);
