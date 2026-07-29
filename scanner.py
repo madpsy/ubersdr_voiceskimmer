@@ -761,11 +761,13 @@ class CallsignScanner:
             # against real hams who were never on the air, so QRZ cannot save
             # us here — the only defence is not asking.
             #
-            # Literal matches are exempt: a callsign Whisper wrote out
-            # verbatim is far stronger evidence than a short run assembled
-            # token by token.
-            if (cand.source == "phonetic"
-                    and len(normalised) < self.args.min_callsign_length):
+            # Applies to literal matches too. Whisper writing a short string
+            # verbatim is better evidence than the same thing assembled token
+            # by token, but it is still not evidence the station exists — and
+            # since QRZ cannot tell a real 3-character callsign from a
+            # coincidental match either, the extra confidence buys nothing
+            # here.
+            if len(normalised) < self.args.min_callsign_length:
                 self.shared.bump("too_short")
                 if self.args.verbose:
                     log.info(
@@ -1108,8 +1110,7 @@ def parse_args(argv=None):
     extract.add_argument("--min-callsign-length", type=int, default=4,
                          help="Minimum character length for a "
                               "phonetically-assembled callsign to be looked "
-                              "up at all (default 4; literal verbatim matches "
-                              "are exempt). Anything shorter is discarded "
+                              "up at all (default 4). Anything shorter is discarded "
                               "before QRZ, so it is never confirmed, logged "
                               "as valid, or spotted. QRZ cannot save us here: "
                               "a bare 3-char candidate is the shortest shape a "

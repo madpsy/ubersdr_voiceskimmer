@@ -152,7 +152,7 @@ exact frequency, so on a quiet instance expect zeroes.
 | `--revisit-cooldown` | 120 s | How long before a frequency may be revisited |
 | `--min-snr` | 8.0 | Raise to skip marginal signals |
 | `--min-extract-confidence` | 0.4 | Raise for precision, lower for recall |
-| `--min-callsign-length` | 4 | Minimum length for a phonetically-assembled callsign to be looked up at all — shorter ones never reach QRZ, so are never confirmed or spotted (literal verbatim matches exempt) |
+| `--min-callsign-length` | 4 | Minimum callsign length to be looked up at all — shorter ones never reach QRZ, so are never confirmed or spotted. Applies to literal verbatim matches too |
 | `--pipeline-latency` | 2.0 s | Raise if your WhisperLive is slow (affects frequency attribution) |
 | `--verbose` | off | Log every transcript segment and rejection — use this while testing |
 | `--no-prefilter` | off | Send every candidate to QRZ, skipping the free CTY filter |
