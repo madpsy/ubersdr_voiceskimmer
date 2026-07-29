@@ -186,9 +186,13 @@ class WebUI:
         # One relay per worker: UberSDR allows a single HTTP audio consumer
         # per session, and each worker is its own session.
         self.audio: Dict[int, AudioRelay] = {w: AudioRelay() for w in self.worker_ids}
-        # Keyed by normalised callsign — latest sighting wins, but first_seen/
-        # hit_count accumulate across repeats, mirroring the on-screen
-        # "(repeat)" tracking in scanner.py's own self.confirmed dict.
+        # Keyed "callsign|freq_bucket" — the same (callsign, frequency-bucket)
+        # identity scanner.py's own self.confirmed dict uses, so a station
+        # that moves bands gets its own row and its own hit_count instead of
+        # silently overwriting the previous frequency's entry. Latest
+        # sighting on a given bucket wins, but first_seen/hit_count
+        # accumulate across repeats on that bucket, mirroring the on-screen
+        # "(repeat)" tracking.
         self._confirmed: Dict[str, Dict[str, Any]] = {}
         self._spots: "deque[Dict[str, Any]]" = deque(maxlen=spots_maxlen)
         self._targets: List[Dict[str, Any]] = []
@@ -341,28 +345,33 @@ class WebUI:
                 self._live[worker] = entry
         self._broadcast("transcript" if completed else "live", entry)
 
-    def push_confirmed(self, detection: Dict[str, Any], is_repeat: bool) -> None:
+    def push_confirmed(
+        self, detection: Dict[str, Any], is_repeat: bool, freq_bucket: int
+    ) -> None:
         """`detection` is dataclasses.asdict(Detection)."""
         call = detection["normalised"]
+        key = f"{call}|{freq_bucket}"
         with self._lock:
-            existing = self._confirmed.get(call)
+            existing = self._confirmed.get(key)
             entry = dict(detection)
+            entry["key"] = key
             entry["first_seen"] = existing["timestamp"] if existing else detection["timestamp"]
             entry["hit_count"] = (existing["hit_count"] + 1) if existing else 1
             entry["is_repeat"] = is_repeat
             entry["spotted_at"] = existing.get("spotted_at") if existing else None
-            self._confirmed[call] = entry
+            self._confirmed[key] = entry
         self._broadcast("confirmed", entry)
 
-    def push_spot(self, callsign: str, freq: int, comment: str) -> None:
+    def push_spot(self, callsign: str, freq: int, comment: str, freq_bucket: int) -> None:
+        key = f"{callsign}|{freq_bucket}"
         entry = {
             "time": time.time(), "callsign": callsign,
-            "freq": freq, "comment": comment,
+            "freq": freq, "comment": comment, "key": key,
         }
         with self._lock:
             self._spots.append(entry)
-            if callsign in self._confirmed:
-                self._confirmed[callsign]["spotted_at"] = entry["time"]
+            if key in self._confirmed:
+                self._confirmed[key]["spotted_at"] = entry["time"]
         self._broadcast("spot", entry)
 
     def set_worker_status(self, worker: int, connected: bool, detail: str = "") -> None:

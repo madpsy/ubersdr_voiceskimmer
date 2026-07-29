@@ -24,7 +24,7 @@
   // Client-side copies, keyed the same way the server keeps them, so each
   // incremental event only has to touch one row instead of asking the
   // server for a full snapshot again.
-  const confirmed = new Map();   // normalised callsign -> detection dict
+  const confirmed = new Map();   // "callsign|freq_bucket" -> detection dict
   let startTime = Date.now() / 1000;
 
   // -- Formatting -----------------------------------------------------------
@@ -296,7 +296,7 @@
   // -- Confirmed callsigns table --------------------------------------------
 
   function renderConfirmedRow(det) {
-    confirmed.set(det.normalised, det);
+    confirmed.set(det.key, det);
     redrawConfirmed();
   }
 
@@ -336,7 +336,7 @@
   // correctly, but the live table kept the pre-spot object and read "no"
   // until then.
   function markSpotted(spot) {
-    const d = confirmed.get(spot.callsign);
+    const d = confirmed.get(spot.key);
     if (!d || d.spotted_at) return;
     d.spotted_at = spot.time;
     redrawConfirmed();
@@ -468,7 +468,7 @@
       renderStatus(w.status ? { ...w.status, worker: w.id } : null);
     }
     confirmed.clear();
-    (state.confirmed || []).forEach((d) => confirmed.set(d.normalised, d));
+    (state.confirmed || []).forEach((d) => confirmed.set(d.key, d));
     redrawConfirmed();
     els.spotsBody.innerHTML = "";
     // Snapshot spots arrive oldest-first and renderSpotRow inserts each at the

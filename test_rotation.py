@@ -330,7 +330,7 @@ class TestSegmentJoinDoesNotDoubleCount(unittest.TestCase):
             def submit(self, f, c, cm):
                 outer.spotted.append(c); return True
         sc.validator = V()
-        sc._announce = lambda d, r: outer.announced.append(d.normalised)
+        sc._announce = lambda d, r, fb: outer.announced.append(d.normalised)
         sc._write = lambda d: None
         shared.spotter = S()
         sc.web = None

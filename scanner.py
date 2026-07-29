@@ -27,7 +27,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from activity import ActivityTracker, Target
 from lookup import CallsignValidator, LookupResult
@@ -121,7 +121,12 @@ class SharedState:
         )
         self.spotter: Optional[DXClusterSpotter] = None
         self.lock = threading.Lock()
-        self.confirmed: Dict[str, Detection] = {}
+        # Keyed (callsign, frequency-bucket) rather than callsign alone: a
+        # station that moves bands is a fresh sighting worth its own row and
+        # its own hit count, not a silent overwrite of the old one — see
+        # SpotThrottle.bucket_freq, which supplies the same bucket boundary
+        # spot_min_hits gates on so the two never disagree.
+        self.confirmed: Dict[Tuple[str, int], Detection] = {}
         self.stats = {
             "dwells": 0, "segments": 0, "candidates": 0, "malformed": 0,
             "validated": 0, "rejected": 0, "dx_agreements": 0, "straddled": 0,
@@ -852,9 +857,11 @@ class CallsignScanner:
                 self.shared.bump("validated")
                 if detection.agrees_with_dx_spot:
                     self.shared.bump("dx_agreements")
-                is_repeat = normalised in self.confirmed
-                self.confirmed[normalised] = detection
-                self._announce(detection, is_repeat)
+                freq_bucket = self.spot_throttle.bucket_freq(detection.frequency)
+                key = (normalised, freq_bucket)
+                is_repeat = key in self.confirmed
+                self.confirmed[key] = detection
+                self._announce(detection, is_repeat, freq_bucket)
                 # Independent of is_repeat: the on-screen tag never resets,
                 # but a station still active after the spot cooldown is worth
                 # spotting again — see SpotThrottle.
@@ -871,7 +878,7 @@ class CallsignScanner:
 
         return detections
 
-    def _announce(self, detection: Detection, is_repeat: bool) -> None:
+    def _announce(self, detection: Detection, is_repeat: bool, freq_bucket: int) -> None:
         """
         Print a confirmed callsign in a way that's self-contained and
         unmissable in a long-running, possibly --verbose scroll — includes
@@ -899,7 +906,7 @@ class CallsignScanner:
         log.info("      heard: %r", detection.raw_text[:140])
 
         if self.web:
-            self.web.push_confirmed(asdict(detection), is_repeat)
+            self.web.push_confirmed(asdict(detection), is_repeat, freq_bucket)
 
     def _maybe_spot(self, detection: Detection) -> None:
         """
@@ -942,7 +949,10 @@ class CallsignScanner:
         if self.shared.spotter.submit(detection.frequency, detection.normalised, comment):
             self.spot_throttle.record(detection.normalised, detection.frequency)
             if self.web:
-                self.web.push_spot(detection.normalised, detection.frequency, comment)
+                self.web.push_spot(
+                    detection.normalised, detection.frequency, comment,
+                    self.spot_throttle.bucket_freq(detection.frequency),
+                )
 
     def _build_detection(
         self, segment: Segment, target: Target,
@@ -1060,7 +1070,7 @@ class CallsignScanner:
 
         if self.confirmed:
             print(f"\nConfirmed callsigns ({len(self.confirmed)}):")
-            for call, det in sorted(self.confirmed.items()):
+            for (call, _bucket), det in sorted(self.confirmed.items()):
                 flag = " [DX]" if det.agrees_with_dx_spot else ""
                 where = f"{det.frequency / 1e6:.3f} MHz {det.band}"
                 who = det.name or det.country or ""

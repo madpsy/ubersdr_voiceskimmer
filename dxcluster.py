@@ -194,8 +194,18 @@ class SpotThrottle:
         self._lock = threading.Lock()
 
     def _key(self, callsign: str, freq_hz: int) -> Tuple[str, int]:
-        bucket = round(freq_hz / self._bucket_hz) * self._bucket_hz
-        return (callsign, bucket)
+        return (callsign, self.bucket_freq(freq_hz))
+
+    def bucket_freq(self, freq_hz: int) -> int:
+        """
+        Round a frequency to the same bucket used for hit-counting and the
+        spot cooldown. Exposed so callers outside this class (scanner.py's
+        confirmed-callsigns tracking) can group by "the same station on the
+        same frequency" using the exact same boundary spot_min_hits gates
+        on — otherwise a UI-level hit count could disagree with the number
+        that actually decides when a spot goes out.
+        """
+        return round(freq_hz / self._bucket_hz) * self._bucket_hz
 
     def record_hit(self, callsign: str, freq_hz: int) -> int:
         """
