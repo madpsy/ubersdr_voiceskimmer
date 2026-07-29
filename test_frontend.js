@@ -253,6 +253,28 @@ check("app.js loads without throwing", () => {
   assert.ok(T, "test hook missing");
 });
 
+check("the explain modal stacks above the map", () => {
+  // Leaflet's panes and controls carry their own z-indexes and
+  // .leaflet-container creates no stacking context, so they compete with the
+  // modal directly. The modal shipped at 50 against Leaflet's 1000 and opened
+  // underneath the map. Compared against leaflet.css rather than a hardcoded
+  // number so upgrading Leaflet cannot quietly reintroduce it.
+  const dir = path.join(__dirname, "static");
+  const html = fs.readFileSync(path.join(dir, "index.html"), "utf8");
+  const leaflet = fs.readFileSync(path.join(dir, "leaflet.css"), "utf8");
+
+  const modal = html.match(/#explain-backdrop\s*\{[\s\S]*?z-index:\s*(\d+)/);
+  assert.ok(modal, "no z-index on #explain-backdrop");
+
+  const highest = Math.max(
+    ...[...leaflet.matchAll(/z-index:\s*(\d+)/g)].map((m) => Number(m[1]))
+  );
+  assert.ok(
+    Number(modal[1]) > highest,
+    `modal z-index ${modal[1]} is not above leaflet's highest (${highest})`
+  );
+});
+
 check("a full state snapshot renders", () => {
   T.applyState({
     workers: [

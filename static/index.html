@@ -328,7 +328,13 @@
     align-items: center;
     justify-content: center;
     padding: 20px;
-    z-index: 50;
+    /* Above Leaflet, whose panes and controls run up to z-index 1000.
+       .leaflet-container is position:relative with no z-index of its own, so
+       it creates no stacking context and those panes compete directly with
+       this backdrop in the root context — at 50 the modal opened UNDER the
+       map. test_frontend.js asserts this stays above everything leaflet.css
+       declares, so a Leaflet upgrade cannot quietly reintroduce it. */
+    z-index: 2000;
   }
   #explain-backdrop.open { display: flex; }
   #explain {
