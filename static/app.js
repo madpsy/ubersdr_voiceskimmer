@@ -12,17 +12,12 @@
   const TRANSCRIPT_MAX_LINES = 400;
 
   const els = {
-    current: document.getElementById("current"),
     uptime: document.getElementById("uptime"),
     stats: document.getElementById("stats"),
-    transcript: document.getElementById("transcript"),
-    transcriptScroll: document.getElementById("transcript-scroll"),
+    transcripts: document.getElementById("transcripts"),
     confirmedBody: document.querySelector("#confirmed-table tbody"),
     spotsBody: document.querySelector("#spots-table tbody"),
     targetsBody: document.querySelector("#targets-table tbody"),
-    listen: document.getElementById("listen"),
-    audio: document.getElementById("audio-el"),
-    signal: document.getElementById("signal"),
     receiver: document.getElementById("receiver"),
   };
 
@@ -61,20 +56,82 @@
     return d.innerHTML;
   }
 
-  // -- Header: current dwell -------------------------------------------------
+  // -- Per-worker panels -----------------------------------------------------
+
+  // Each scanning worker is an independent session on its own frequency, so
+  // it gets its own transcript, frequency readout, SNR and Listen button.
+  // With one worker this is simply the single panel it always was.
+  const panels = new Map();   // worker id -> panel refs
+
+  function buildPanels(workers) {
+    if (panels.size === workers.length) return;   // already built
+    panels.clear();
+    els.transcripts.innerHTML = "";
+    const many = workers.length > 1;
+
+    for (const w of workers) {
+      const sec = document.createElement("section");
+      sec.className = "panel transcript-panel";
+      sec.innerHTML =
+        `<h2 class="tp-head">` +
+        `<span class="tp-dot" title="Whisper connection"></span>` +
+        `<span class="tp-label">${many ? `Transcript ${w.id + 1}` : "Live transcript"}</span>` +
+        `<span class="tp-current"><span class="empty">waiting for a target…</span></span>` +
+        `<span class="tp-signal" title="Live SNR from the audio stream. A peak above the threshold keeps this worker on the frequency."></span>` +
+        `<button class="tp-listen" disabled title="Hear what this worker is tuned to — follows it as it hops">🔈 Listen</button>` +
+        `</h2>` +
+        `<div class="scroll"><div class="transcript"></div></div>` +
+        `<audio hidden></audio>`;
+      els.transcripts.appendChild(sec);
+
+      const p = {
+        id: w.id,
+        current: sec.querySelector(".tp-current"),
+        signal: sec.querySelector(".tp-signal"),
+        listen: sec.querySelector(".tp-listen"),
+        audio: sec.querySelector("audio"),
+        dot: sec.querySelector(".tp-dot"),
+        transcript: sec.querySelector(".transcript"),
+        scroll: sec.querySelector(".scroll"),
+        liveLine: null,
+        listening: false,
+      };
+      p.listen.addEventListener("click", () => setListening(p, !p.listening));
+      p.audio.addEventListener("error", () => {
+        if (p.listening) setListening(p, false);
+      });
+      panels.set(w.id, p);
+    }
+  }
+
+  const panelFor = (e) => panels.get(e && e.worker != null ? e.worker : 0);
+
+  // Green once Whisper is attached and transcribing, red when the attach
+  // failed or the session dropped, grey while still coming up. The failure is
+  // otherwise silent — whisper.max_users defaults to 2 on the server, so a
+  // second worker is routinely refused while the first runs on happily.
+  function renderStatus(st) {
+    const p = panelFor(st);
+    if (!p || !st) return;
+    const up = st.connected === true, down = st.connected === false;
+    p.dot.classList.toggle("up", up);
+    p.dot.classList.toggle("down", down);
+    p.dot.title = st.detail || (up ? "transcribing" : down ? "not connected" : "connecting");
+  }
 
   function renderCurrent(current) {
+    const p = panelFor(current);
+    if (!p) return;
     if (!current) {
-      els.current.innerHTML = '<span class="empty">waiting for a target…</span>';
+      p.current.innerHTML = '<span class="empty">waiting for a target…</span>';
       return;
     }
     const dx = current.dx_callsign
-      ? ` <span class="dx">★ DX spot: ${esc(current.dx_callsign)}</span>`
+      ? ` <span class="dx">★ ${esc(current.dx_callsign)}</span>`
       : "";
-    els.current.innerHTML =
-      `${esc(current.band)} &nbsp; <span class="freq">${fmtFreq(current.dial_freq)}</span> ` +
-      `${esc((current.mode || "").toUpperCase())} &nbsp; ` +
-      `SNR ${(current.snr ?? 0).toFixed(1)} dB &nbsp; conf ${(current.confidence ?? 0).toFixed(2)}${dx}`;
+    p.current.innerHTML =
+      `${esc(current.band)} <span class="freq">${fmtFreq(current.dial_freq)}</span> ` +
+      `${esc((current.mode || "").toUpperCase())}${dx}`;
   }
 
   // -- Which receiver is this? ----------------------------------------------
@@ -109,8 +166,10 @@
   // nothing for. The bar is scaled around the threshold rather than 0-100:
   // the interesting range is a few dB either side of it.
   function renderSignal(sig) {
+    const p = panelFor(sig);
+    if (!p) return;
     if (!sig || typeof sig.snr !== "number") {
-      els.signal.innerHTML = "";
+      p.signal.innerHTML = "";
       return;
     }
     const thr = sig.threshold ?? 40;
@@ -123,9 +182,9 @@
     // separately because that is what the dwell decision uses — it stays
     // green once cleared even as the live value dips between overs.
     const live = sig.snr >= thr;
-    els.signal.classList.toggle("active", live);
-    els.signal.classList.toggle("low", !live);
-    els.signal.innerHTML =
+    p.signal.classList.toggle("active", live);
+    p.signal.classList.toggle("low", !live);
+    p.signal.innerHTML =
       `SNR <span class="val">${sig.snr.toFixed(1)}</span>` +
       `<span class="bar"><i style="width:${pct.toFixed(0)}%"></i></span>` +
       `peak <span class="peak${peak >= thr ? " cleared" : ""}">` +
@@ -167,12 +226,9 @@
   // static/extensions/whisper/main.js (transcript[] vs lastSegment); appending
   // each refinement instead renders one utterance as a column of near-
   // identical lines.
-  let liveLine = null;
-
-  function scrolledToBottom() {
+  function scrolledToBottom(p) {
     return (
-      els.transcriptScroll.scrollTop + els.transcriptScroll.clientHeight >=
-      els.transcriptScroll.scrollHeight - 24
+      p.scroll.scrollTop + p.scroll.clientHeight >= p.scroll.scrollHeight - 24
     );
   }
 
@@ -184,43 +240,46 @@
     );
   }
 
-  function appendTranscript(entry) {
-    const atBottom = scrolledToBottom();
+  function appendTranscript(entry, panel) {
+    // The panel is passed explicitly when replaying a snapshot, where the
+    // caller already knows which worker's list it is walking. Live events
+    // carry the worker on the entry itself.
+    const p = panel || panelFor(entry);
+    if (!p) return;
+    const atBottom = scrolledToBottom(p);
 
     const line = document.createElement("div");
     line.className = "final";
     line.innerHTML = lineHTML(entry, "✓");
     // Keep the live line last so the in-progress text stays at the bottom.
-    els.transcript.insertBefore(line, liveLine);
+    p.transcript.insertBefore(line, p.liveLine);
 
-    while (els.transcript.children.length > TRANSCRIPT_MAX_LINES) {
-      const first = els.transcript.firstChild;
-      if (first === liveLine) break;
-      els.transcript.removeChild(first);
+    while (p.transcript.children.length > TRANSCRIPT_MAX_LINES) {
+      const first = p.transcript.firstChild;
+      if (first === p.liveLine) break;
+      p.transcript.removeChild(first);
     }
-    if (atBottom) {
-      els.transcriptScroll.scrollTop = els.transcriptScroll.scrollHeight;
-    }
+    if (atBottom) p.scroll.scrollTop = p.scroll.scrollHeight;
   }
 
-  function setLiveTranscript(entry) {
-    const atBottom = scrolledToBottom();
+  function setLiveTranscript(entry, panel) {
+    const p = panel || panelFor(entry);
+    if (!p) return;
+    const atBottom = scrolledToBottom(p);
     if (!entry) {
-      if (liveLine) {
-        liveLine.remove();
-        liveLine = null;
+      if (p.liveLine) {
+        p.liveLine.remove();
+        p.liveLine = null;
       }
       return;
     }
-    if (!liveLine) {
-      liveLine = document.createElement("div");
-      liveLine.className = "partial";
-      els.transcript.appendChild(liveLine);
+    if (!p.liveLine) {
+      p.liveLine = document.createElement("div");
+      p.liveLine.className = "partial";
+      p.transcript.appendChild(p.liveLine);
     }
-    liveLine.innerHTML = lineHTML(entry, "…");
-    if (atBottom) {
-      els.transcriptScroll.scrollTop = els.transcriptScroll.scrollHeight;
-    }
+    p.liveLine.innerHTML = lineHTML(entry, "…");
+    if (atBottom) p.scroll.scrollTop = p.scroll.scrollHeight;
   }
 
   // -- Confirmed callsigns table --------------------------------------------
@@ -302,49 +361,52 @@
   // follows the scanner as it hops rather than being a separate receiver.
   // Starting it unmutes that session server-side; stopping re-mutes it, so
   // the src is cleared (not just paused) to actually drop the connection.
-  let listening = false;
-
-  function setListening(on) {
-    listening = on;
+  function setListening(p, on) {
+    p.listening = on;
     if (on) {
+      // Each worker is its own session, so its own audio endpoint.
       // Cache-bust so a re-listen opens a fresh request rather than resuming
       // a stale buffered one.
-      els.audio.src = "api/audio?t=" + Date.now();
-      els.audio.play().catch((err) => {
+      p.audio.src = `api/audio/${p.id}?t=` + Date.now();
+      p.audio.play().catch((err) => {
         console.error("audio play failed", err);
-        setListening(false);
+        setListening(p, false);
       });
     } else {
-      els.audio.pause();
-      els.audio.removeAttribute("src");
-      els.audio.load();
+      p.audio.pause();
+      p.audio.removeAttribute("src");
+      p.audio.load();
     }
-    els.listen.classList.toggle("on", on);
-    els.listen.textContent = on ? "🔊 Listening" : "🔈 Listen";
+    p.listen.classList.toggle("on", on);
+    p.listen.textContent = on ? "🔊 Listening" : "🔈 Listen";
   }
 
-  els.listen.addEventListener("click", () => setListening(!listening));
-  els.audio.addEventListener("error", () => {
-    if (listening) setListening(false);
-  });
-
-  function renderAudioAvailable(available) {
-    els.listen.disabled = !available;
-    els.listen.title = available
-      ? "Hear what the scanner is tuned to — follows it as it hops"
+  function renderAudioAvailable(p, available) {
+    p.listen.disabled = !available;
+    p.listen.title = available
+      ? "Hear what this worker is tuned to — follows it as it hops"
       : "Audio session not ready yet";
-    if (!available && listening) setListening(false);
+    if (!available && p.listening) setListening(p, false);
   }
 
   // -- Full snapshot ----------------------------------------------------------
 
   function applyState(state) {
-    renderCurrent(state.current);
+    const workers = state.workers || [];
+    buildPanels(workers);
     renderStats(state.stats);
-    els.transcript.innerHTML = "";
-    liveLine = null;
-    (state.transcript || []).forEach(appendTranscript);
-    setLiveTranscript(state.live || null);
+    for (const w of workers) {
+      const p = panels.get(w.id);
+      if (!p) continue;
+      p.transcript.innerHTML = "";
+      p.liveLine = null;
+      renderCurrent(w.current ? { ...w.current, worker: w.id } : null);
+      (w.transcript || []).forEach((e) => appendTranscript(e, p));
+      setLiveTranscript(w.live || null, p);
+      renderSignal(w.signal ? { ...w.signal, worker: w.id } : null);
+      renderAudioAvailable(p, !!w.audio_available);
+      renderStatus(w.status ? { ...w.status, worker: w.id } : null);
+    }
     confirmed.clear();
     (state.confirmed || []).forEach((d) => confirmed.set(d.normalised, d));
     redrawConfirmed();
@@ -355,8 +417,6 @@
     // the oldest first on every page load.
     (state.spots || []).forEach(renderSpotRow);
     renderTargets(state.targets);
-    renderSignal(state.signal);
-    renderAudioAvailable(!!state.audio_available);
   }
 
   // -- Wiring -----------------------------------------------------------------
@@ -372,8 +432,9 @@
     es.addEventListener("hop", (e) => renderCurrent(JSON.parse(e.data)));
     es.addEventListener("transcript", (e) => {
       // A segment completing supersedes the in-progress line it grew from.
-      appendTranscript(JSON.parse(e.data));
-      setLiveTranscript(null);
+      const entry = JSON.parse(e.data);
+      appendTranscript(entry);
+      setLiveTranscript(null, panelFor(entry));
     });
     es.addEventListener("live", (e) => setLiveTranscript(JSON.parse(e.data)));
     es.addEventListener("confirmed", (e) => renderConfirmedRow(JSON.parse(e.data)));
@@ -381,6 +442,7 @@
     es.addEventListener("stats", (e) => renderStats(JSON.parse(e.data)));
     es.addEventListener("targets", (e) => renderTargets(JSON.parse(e.data)));
     es.addEventListener("signal", (e) => renderSignal(JSON.parse(e.data)));
+    es.addEventListener("status", (e) => renderStatus(JSON.parse(e.data)));
     es.onerror = () => {
       // The browser's EventSource auto-reconnects; nothing to do here beyond
       // letting the connection indicator (uptime keeps ticking) imply it.

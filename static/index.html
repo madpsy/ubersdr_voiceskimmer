@@ -60,14 +60,14 @@
   #receiver .call { color: var(--text); font-weight: 600; }
   #receiver .sep { color: var(--border); margin: 0 6px; }
 
-  #signal {
+  .tp-signal {
     font-size: 12px;
     color: var(--dim);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
-  #signal .val { color: var(--text); font-weight: 600; }
-  #signal .bar {
+  .tp-signal .val { color: var(--text); font-weight: 600; }
+  .tp-signal .bar {
     display: inline-block;
     width: 70px; height: 6px;
     background: #21262d;
@@ -76,22 +76,22 @@
     vertical-align: middle;
     margin: 0 4px;
   }
-  #signal .bar i {
+  .tp-signal .bar i {
     display: block; height: 100%;
     background: var(--dim);
     transition: width .15s linear, background-color .15s linear;
   }
   /* Live reading below the threshold — nothing worth stopping for yet. */
-  #signal.low .val, #signal.low .peak { color: var(--warn); }
-  #signal.low .bar i { background: var(--warn); }
+  .tp-signal.low .val, .tp-signal.low .peak { color: var(--warn); }
+  .tp-signal.low .bar i { background: var(--warn); }
   /* At or above it — a real signal is present right now. */
-  #signal.active .val { color: var(--good); }
-  #signal.active .bar i { background: var(--good); }
+  .tp-signal.active .val { color: var(--good); }
+  .tp-signal.active .bar i { background: var(--good); }
   /* The peak is what the dwell decision is made on, so it stays green once
      cleared even while the instantaneous value dips between overs. */
-  #signal .peak.cleared { color: var(--good); }
+  .tp-signal .peak.cleared { color: var(--good); }
 
-  #listen {
+  .tp-listen {
     background: #21262d;
     color: var(--text);
     border: 1px solid var(--border);
@@ -101,9 +101,9 @@
     cursor: pointer;
     white-space: nowrap;
   }
-  #listen:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-  #listen.on { background: #113a1e; border-color: var(--good); color: var(--good); }
-  #listen:disabled { opacity: .45; cursor: not-allowed; }
+  .tp-listen:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .tp-listen.on { background: #113a1e; border-color: var(--good); color: var(--good); }
+  .tp-listen:disabled { opacity: .45; cursor: not-allowed; }
 
   #stats {
     display: flex;
@@ -153,29 +153,29 @@
      entry naturally occupies more than one of these lines. */
   /* Declared on the panel so both the scrolling container and the transcript
      inherit them — custom properties inherit downwards only. */
-  #transcript-panel {
+  .transcript-panel {
     --line-size: 12.5px;
     --line-height: 1.5;
     --visible-lines: 15;
     --pad-y: 8px;
   }
-  #transcript {
+  .transcript {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: var(--line-size);
     line-height: var(--line-height);
     padding: var(--pad-y) 12px;
   }
-  #transcript-panel .scroll {
+  .transcript-panel .scroll {
     max-height: calc(
       var(--visible-lines) * var(--line-size) * var(--line-height)
       + 2 * var(--pad-y)
     );
   }
-  #transcript div { white-space: pre-wrap; word-break: break-word; }
-  #transcript .partial { color: var(--dim); }
-  #transcript .final { color: var(--text); }
-  #transcript .final .marker { color: var(--good); }
-  #transcript .meta { color: var(--dim); }
+  .transcript div { white-space: pre-wrap; word-break: break-word; }
+  .transcript .partial { color: var(--dim); }
+  .transcript .final { color: var(--text); }
+  .transcript .final .marker { color: var(--good); }
+  .transcript .meta { color: var(--dim); }
 
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   thead th {
@@ -209,6 +209,45 @@
   .empty-row td { color: var(--dim); font-style: italic; }
 
   #spots-panel .scroll, #targets-panel .scroll { max-height: 32vh; }
+
+  /* Transcript panels span the full grid width and split between themselves,
+     so one worker gets the whole row and two sit side by side. */
+  /* Stacked, not side by side: transcript lines are long, so full width
+     matters more than seeing both at once. */
+  #transcripts {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .tp-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .tp-head .tp-label { flex: 0 0 auto; }
+  .tp-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--dim);
+    margin-right: 6px;
+    vertical-align: middle;
+    flex: 0 0 auto;
+  }
+  .tp-dot.up { background: var(--good); box-shadow: 0 0 5px var(--good); }
+  .tp-dot.down { background: var(--bad); box-shadow: 0 0 5px var(--bad); }
+  .tp-head .tp-current {
+    color: var(--text);
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 12px;
+  }
+  .tp-head .tp-current .freq { color: var(--accent); font-weight: 600; }
+  .tp-head .tp-current .dx { color: var(--star); }
+  .tp-head .tp-current .empty { color: var(--dim); }
+  .tp-head .tp-signal { margin-left: auto; }
 </style>
 </head>
 <body>
@@ -216,20 +255,16 @@
 <header>
   <h1>Voice Skimmer</h1>
   <div id="receiver"></div>
-  <div id="current"><span class="empty">waiting for a target…</span></div>
-  <div id="signal" title="Live SNR measured from the audio stream. A peak above the threshold keeps the scanner on this frequency."></div>
-  <button id="listen" disabled title="Hear what the scanner is tuned to — follows it as it hops">🔈 Listen</button>
   <div id="uptime"></div>
 </header>
-<audio id="audio-el" hidden></audio>
 
 <div id="stats"></div>
 
 <main>
-  <section class="panel" id="transcript-panel">
-    <h2>Live transcript</h2>
-    <div class="scroll" id="transcript-scroll"><div id="transcript"></div></div>
-  </section>
+  <!-- One transcript panel per scanning worker, built by app.js from the
+       workers array. Each carries its own frequency, SNR and Listen button,
+       since each is an independent session on its own frequency. -->
+  <div id="transcripts"></div>
 
   <section class="panel">
     <h2>Confirmed callsigns</h2>

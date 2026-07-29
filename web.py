@@ -160,15 +160,32 @@ class AudioRelay:
 class WebUI:
     """In-memory live state + Flask/SSE server for the dashboard."""
 
-    def __init__(self, transcript_maxlen: int = 300, spots_maxlen: int = 100):
+    def __init__(
+        self, workers: int = 1, transcript_maxlen: int = 300, spots_maxlen: int = 100
+    ):
         self._lock = threading.Lock()
         self._start_time = time.time()
 
-        self._current: Optional[Dict[str, Any]] = None
-        self._transcript: "deque[Dict[str, Any]]" = deque(maxlen=transcript_maxlen)
-        # The single in-flight incomplete segment, replaced as it is refined
-        # and cleared once it completes — see push_transcript.
-        self._live: Optional[Dict[str, Any]] = None
+        # Everything a single scanning session owns is keyed by worker id.
+        # Confirmed callsigns, spots and stats stay shared — they are results,
+        # not per-session state, and it would be actively unhelpful to split a
+        # station's history by whichever worker happened to hear it.
+        self.worker_ids = list(range(workers))
+        self._current: Dict[int, Optional[Dict[str, Any]]] = {w: None for w in self.worker_ids}
+        self._live: Dict[int, Optional[Dict[str, Any]]] = {w: None for w in self.worker_ids}
+        self._signal: Dict[int, Optional[Dict[str, Any]]] = {w: None for w in self.worker_ids}
+        # Whether each worker's Whisper attach is live. Starts unknown so the
+        # dashboard shows "connecting" rather than claiming a failure before
+        # the session has had a chance to come up.
+        self._status: Dict[int, Dict[str, Any]] = {
+            w: {"connected": None, "detail": "connecting"} for w in self.worker_ids
+        }
+        self._transcripts: Dict[int, "deque[Dict[str, Any]]"] = {
+            w: deque(maxlen=transcript_maxlen) for w in self.worker_ids
+        }
+        # One relay per worker: UberSDR allows a single HTTP audio consumer
+        # per session, and each worker is its own session.
+        self.audio: Dict[int, AudioRelay] = {w: AudioRelay() for w in self.worker_ids}
         # Keyed by normalised callsign — latest sighting wins, but first_seen/
         # hit_count accumulate across repeats, mirroring the on-screen
         # "(repeat)" tracking in scanner.py's own self.confirmed dict.
@@ -176,11 +193,9 @@ class WebUI:
         self._spots: "deque[Dict[str, Any]]" = deque(maxlen=spots_maxlen)
         self._targets: List[Dict[str, Any]] = []
         self._stats: Dict[str, Any] = {}
-        self._signal: Optional[Dict[str, Any]] = None
 
         self._subscribers: List["queue.Queue[str]"] = []
         self._subscribers_lock = threading.Lock()
-        self.audio = AudioRelay()
 
         self._server = None
         self._thread: Optional[threading.Thread] = None
@@ -235,18 +250,23 @@ class WebUI:
             )
 
         @app.route("/api/audio")
-        def api_audio():
+        @app.route("/api/audio/<int:worker>")
+        def api_audio(worker: int = 0):
             """
-            Live audio from whatever the scanner is currently tuned to.
+            Live audio from whatever that worker is currently tuned to.
 
-            Follows the scanner as it hops — it is the same session, retuned
-            in place, not a separate receiver.
+            Follows it as it hops — the same session retuned in place, not a
+            separate receiver. Each worker is its own session and so its own
+            relay; UberSDR allows one HTTP audio consumer per session.
             """
-            if not self.audio.available:
+            relay = self.audio.get(worker)
+            if relay is None:
+                return jsonify({"error": f"no such worker {worker}"}), 404
+            if not relay.available:
                 return jsonify({"error": "audio session not ready"}), 503
 
             def stream():
-                q = self.audio.subscribe()
+                q = relay.subscribe()
                 try:
                     while True:
                         try:
@@ -258,8 +278,8 @@ class WebUI:
                         yield chunk
                 finally:
                     # Runs when the browser stops/closes the <audio> element,
-                    # which is what re-mutes the session.
-                    self.audio.unsubscribe(q)
+                    # which is what re-mutes that worker's session.
+                    relay.unsubscribe(q)
 
             return Response(
                 stream(),
@@ -287,14 +307,16 @@ class WebUI:
 
     # -- Mutators (called from scanner.py's threads) ---------------------
 
-    def set_current(self, target: Dict[str, Any]) -> None:
+    def set_current(self, worker: int, target: Dict[str, Any]) -> None:
         """A real hop happened — `target` is dataclasses.asdict(Target)."""
+        entry = {**target, "started_at": time.time(), "worker": worker}
         with self._lock:
-            self._current = {**target, "started_at": time.time()}
-            current = self._current
-        self._broadcast("hop", current)
+            self._current[worker] = entry
+        self._broadcast("hop", entry)
 
-    def push_transcript(self, band: str, freq: int, completed: bool, text: str) -> None:
+    def push_transcript(
+        self, worker: int, band: str, freq: int, completed: bool, text: str
+    ) -> None:
         """
         Record a transcript segment.
 
@@ -309,14 +331,14 @@ class WebUI:
         """
         entry = {
             "time": time.time(), "band": band, "freq": freq,
-            "completed": completed, "text": text,
+            "completed": completed, "text": text, "worker": worker,
         }
         with self._lock:
             if completed:
-                self._transcript.append(entry)
-                self._live = None
+                self._transcripts[worker].append(entry)
+                self._live[worker] = None
             else:
-                self._live = entry
+                self._live[worker] = entry
         self._broadcast("transcript" if completed else "live", entry)
 
     def push_confirmed(self, detection: Dict[str, Any], is_repeat: bool) -> None:
@@ -343,7 +365,24 @@ class WebUI:
                 self._confirmed[callsign]["spotted_at"] = entry["time"]
         self._broadcast("spot", entry)
 
-    def update_signal(self, snr: float, peak: Optional[float], threshold: float) -> None:
+    def set_worker_status(self, worker: int, connected: bool, detail: str = "") -> None:
+        """
+        Whether this worker is attached to Whisper and transcribing.
+
+        Worth surfacing because the failure is silent otherwise: whisper
+        max_users defaults to 2 on the server, so a second worker is routinely
+        refused with "maximum users reached" while the first carries on
+        happily. Without this the dashboard just shows an empty panel with no
+        indication of why.
+        """
+        entry = {"worker": worker, "connected": connected, "detail": detail}
+        with self._lock:
+            self._status[worker] = entry
+        self._broadcast("status", entry)
+
+    def update_signal(
+        self, worker: int, snr: float, peak: Optional[float], threshold: float
+    ) -> None:
         """
         Live signal reading for the frequency currently tuned.
 
@@ -351,9 +390,12 @@ class WebUI:
         frames arrive at ~50 Hz, which would swamp the SSE stream and every
         connected browser for no visible benefit.
         """
-        entry = {"snr": snr, "peak": peak, "threshold": threshold, "time": time.time()}
+        entry = {
+            "snr": snr, "peak": peak, "threshold": threshold,
+            "time": time.time(), "worker": worker,
+        }
         with self._lock:
-            self._signal = entry
+            self._signal[worker] = entry
         self._broadcast("signal", entry)
 
     def update_stats(self, stats: Dict[str, Any], targets: List[Dict[str, Any]]) -> None:
@@ -377,15 +419,22 @@ class WebUI:
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             return {
-                "current": self._current,
-                "transcript": list(self._transcript),
-                "live": self._live,
+                "workers": [
+                    {
+                        "id": w,
+                        "current": self._current[w],
+                        "live": self._live[w],
+                        "signal": self._signal[w],
+                        "transcript": list(self._transcripts[w]),
+                        "audio_available": self.audio[w].available,
+                        "status": self._status[w],
+                    }
+                    for w in self.worker_ids
+                ],
                 "confirmed": list(self._confirmed.values()),
                 "spots": list(self._spots),
                 "targets": self._targets,
                 "stats": self._stats_payload_locked(),
-                "signal": self._signal,
-                "audio_available": self.audio.available,
             }
 
     # -- Lifecycle ----------------------------------------------------------

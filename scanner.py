@@ -90,35 +90,89 @@ class Detection:
     straddled_hop: bool = False
 
 
-class CallsignScanner:
-    def __init__(self, args, web: Optional[WebUI] = None):
-        self.args = args
-        self.web = web
-        self.base_url = (
-            f"{'https' if args.ssl else 'http'}://{args.host}:{args.port}"
-        )
+class SharedState:
+    """
+    Everything the scanning workers hold in common.
 
-        self.segments: "queue.Queue[Segment]" = queue.Queue()
+    One instance per run, handed to every CallsignScanner. Anything here is
+    touched from several worker threads at once, so the mutable parts are
+    guarded: ActivityTracker, SpotThrottle and DXClusterSpotter carry their
+    own locks already, while the counters, the confirmed set and the JSONL
+    file did not and are protected here.
+
+    Results deliberately stay shared rather than per worker. A station is a
+    station regardless of which session happened to hear it, and splitting
+    them would double-count uniques, break the "(repeat)" tag, and let both
+    workers spot the same callsign moments apart.
+    """
+
+    def __init__(self, args, base_url: str):
         self.tracker = ActivityTracker(
-            base_url=self.base_url,
+            base_url=base_url,
             bands=args.band,
             min_snr=args.min_snr,
             min_confidence=args.min_confidence,
         )
-        self.session: Optional[UberSDRSession] = None
-        self.validator: Optional[CallsignValidator] = None
+        self.spot_throttle = SpotThrottle(
+            cooldown=args.spot_cooldown,
+            max_entries=args.spot_max_entries,
+            freq_tolerance_hz=args.spot_freq_tolerance,
+        )
         self.spotter: Optional[DXClusterSpotter] = None
+        self.lock = threading.Lock()
+        self.confirmed: Dict[str, Detection] = {}
+        self.stats = {
+            "dwells": 0, "segments": 0, "candidates": 0, "malformed": 0,
+            "validated": 0, "rejected": 0, "dx_agreements": 0, "straddled": 0,
+        }
+
+        self.log_lock = threading.Lock()
+        self.log_file = None
+
+    def bump(self, key: str, amount: int = 1) -> None:
+        with self.lock:
+            self.stats[key] += amount
+
+
+class CallsignScanner:
+    """
+    One scanning session: its own audio socket, Whisper attach and dwell loop.
+
+    Several can run at once (--parallel), each holding one Whisper slot and
+    sharing a SharedState. They never sit on the same frequency — the tracker
+    hands out claims, see ActivityTracker.next_target.
+    """
+
+    def __init__(
+        self,
+        args,
+        web: Optional[WebUI] = None,
+        worker_id: int = 0,
+        shared: Optional[SharedState] = None,
+    ):
+        self.args = args
+        self.web = web
+        self.worker_id = worker_id
+        self.base_url = (
+            f"{'https' if args.ssl else 'http'}://{args.host}:{args.port}"
+        )
+        self.shared = shared or SharedState(args, self.base_url)
+
+        self.segments: "queue.Queue[Segment]" = queue.Queue()
+        self.tracker = self.shared.tracker
+        self.session: Optional[UberSDRSession] = None
+        # Per worker rather than shared: a lookup is authenticated by an
+        # active audio session, so each one uses its own. The cost is that a
+        # callsign heard by both workers is looked up twice, which is
+        # immaterial from a bypassed IP.
+        self.validator: Optional[CallsignValidator] = None
         # Recent completed segments for the CURRENT frequency, oldest first,
         # capped at 3 — used to reconstruct callsigns WhisperLive's VAD split
         # mid-utterance (max_speech_duration_s forces a break every 15s with
         # no real pause). Reset to [] on every genuine hop in _dwell().
         self._segment_history: List[Segment] = []
 
-        self.spot_throttle = SpotThrottle(
-            cooldown=args.spot_cooldown,
-            max_entries=args.spot_max_entries,
-            freq_tolerance_hz=args.spot_freq_tolerance,
-        )
+        self.spot_throttle = self.shared.spot_throttle
         self.timeline = FrequencyTimeline(pipeline_latency=args.pipeline_latency)
 
         # When set, run() dwells on this exact frequency forever instead of
@@ -138,7 +192,6 @@ class CallsignScanner:
             )
 
         self._running = True
-        self._log_file = None
         self._last_key: Optional[tuple] = None
         self._worker: Optional[threading.Thread] = None
         self._web_stats_thread: Optional[threading.Thread] = None
@@ -172,26 +225,19 @@ class CallsignScanner:
         self._last_snr: Optional[float] = None
         self._last_web_signal = 0.0
 
-        self.stats = {
-            "dwells": 0,
-            "segments": 0,
-            "candidates": 0,
-            "malformed": 0,
-            "validated": 0,
-            "rejected": 0,
-            "dx_agreements": 0,
-            "straddled": 0,
-        }
-        self.confirmed: Dict[str, Detection] = {}
+        # Shared across workers — see SharedState.
+        self.stats = self.shared.stats
+        self.confirmed = self.shared.confirmed
 
     # -- Setup --------------------------------------------------------------
 
     def start(self) -> bool:
-        if self.args.output:
-            self._log_file = open(self.args.output, "a", encoding="utf-8")
-            log.info("Logging detections to %s", self.args.output)
-
-        self.tracker.start()
+        # Shared setup runs once, on whichever worker starts first.
+        if self.worker_id == 0:
+            if self.args.output:
+                self.shared.log_file = open(self.args.output, "a", encoding="utf-8")
+                log.info("Logging detections to %s", self.args.output)
+            self.tracker.start()
 
         if self.locked_target is not None:
             first = self.locked_target
@@ -246,7 +292,7 @@ class CallsignScanner:
         if self.web:
             # Lets the dashboard's listen button relay this session's audio.
             # The session stays muted until someone actually listens.
-            self.web.audio.attach(self.session, self.base_url)
+            self.web.audio[self.worker_id].attach(self.session, self.base_url)
 
         attach_kwargs = {}
         if not self.args.stock_whisper:
@@ -262,6 +308,12 @@ class CallsignScanner:
             self.timeline.record(first)
 
         if not self.session.attach_whisper(**attach_kwargs):
+            if self.web:
+                self.web.set_worker_status(
+                    self.worker_id, False,
+                    "Whisper attach failed — the server may be at "
+                    "whisper.max_users",
+                )
             if attach_kwargs:
                 log.error(
                     "Whisper attach failed. If the server reported that per-attach "
@@ -272,6 +324,9 @@ class CallsignScanner:
             else:
                 log.error("Whisper attach failed (is whisper.enabled set?)")
             return False
+
+        if self.web:
+            self.web.set_worker_status(self.worker_id, True, "transcribing")
 
         # One long-lived consumer for the whole run; the session and the Whisper
         # attach are never rebuilt.
@@ -290,24 +345,28 @@ class CallsignScanner:
             )
             self._web_stats_thread.start()
 
-        if self.args.spot:
-            self.spotter = DXClusterSpotter(
+        # One cluster login for the whole run, however many workers there are:
+        # logging in twice with the same callsign would fight over the same
+        # account, and SpotThrottle already dedupes across workers.
+        if self.args.spot and self.worker_id == 0:
+            spotter = DXClusterSpotter(
                 base_url=self.base_url,
                 spotter_call=self.args.spotter_call,
                 spotter_pass=self.args.spotter_pass,
             )
-            if not self.spotter.start():
+            if spotter.start():
+                self.shared.spotter = spotter
+            else:
                 # Degrade rather than abort: losing spot submission should
                 # not cost the run its actual job of finding and validating
-                # callsigns. Clearing self.spotter makes _maybe_spot's early
-                # return kick in cleanly instead of retrying (and warning)
-                # for every confirmation for the rest of the run.
+                # callsigns. Leaving shared.spotter as None makes
+                # _maybe_spot's early return kick in cleanly instead of
+                # retrying (and warning) for every confirmation.
                 log.error(
                     "DX cluster spot submission unavailable — continuing "
                     "without it. Confirmed callsigns will still be logged "
                     "and printed, just not spotted."
                 )
-                self.spotter = None
 
         return True
 
@@ -327,9 +386,11 @@ class CallsignScanner:
                 self._last_web_signal = time.time()
 
         if due and self.web:
-            self.web.update_signal(snr, peak, self.args.silence_min_snr)
+            self.web.update_signal(self.worker_id, snr, peak, self.args.silence_min_snr)
 
     def _on_session_error(self, message: str) -> None:
+        if self.web:
+            self.web.set_worker_status(self.worker_id, False, message[:120])
         if "kicked" in message.lower() or "audio session" in message.lower():
             log.error("Session lost: %s", message)
             self._running = False
@@ -348,12 +409,20 @@ class CallsignScanner:
                     exclude=self._last_key, cooldown=self.args.revisit_cooldown
                 )
                 if target is None:
+                    # Either nothing is on the air, or every target is claimed
+                    # by another worker. Waiting is right in both cases —
+                    # doubling up on a frequency wastes a Whisper slot.
                     log.info("No active voice targets; waiting")
                     if not self._sleep(10.0):
                         break
                     continue
 
-            self._dwell(target)
+            # Held for the whole dwell so no other worker retunes onto it.
+            self.tracker.claim(target)
+            try:
+                self._dwell(target)
+            finally:
+                self.tracker.release(target)
             self._last_key = target.key
 
             if time.time() - keepalive > 30:
@@ -425,7 +494,7 @@ class CallsignScanner:
                 return
 
             if self.web:
-                self.web.set_current(asdict(target))
+                self.web.set_current(self.worker_id, asdict(target))
 
             # Record the hop before resetting, so in-flight audio from the
             # previous frequency is still attributed to it.
@@ -441,7 +510,7 @@ class CallsignScanner:
             # conversation we just left, not this one.
             self._segment_history = []
 
-        self.stats["dwells"] += 1
+        self.shared.bump("dwells")
         with self._extend_lock:
             self._extend_until = 0.0
         self._success_event.clear()
@@ -535,7 +604,7 @@ class CallsignScanner:
             except queue.Empty:
                 continue
 
-            self.stats["segments"] += 1
+            self.shared.bump("segments")
             marker = "✓" if segment.completed else "…"
             if self.args.verbose:
                 log.info("   %s %s", marker, segment.text)
@@ -546,6 +615,7 @@ class CallsignScanner:
                 # sitting rather than waiting for attribution.
                 live = self.timeline.current()
                 self.web.push_transcript(
+                    self.worker_id,
                     live.band if live else "", live.dial_freq if live else 0,
                     segment.completed, segment.text,
                 )
@@ -571,7 +641,7 @@ class CallsignScanner:
                     self._heard_words += word_count
 
             if attribution.straddled:
-                self.stats["straddled"] += 1
+                self.shared.bump("straddled")
                 if self.args.verbose:
                     log.info(
                         "   ~ segment spans a hop; crediting %.3f MHz (%.0f%%)",
@@ -669,14 +739,14 @@ class CallsignScanner:
             if cand.confidence < self.args.min_extract_confidence:
                 continue
 
-            self.stats["candidates"] += 1
+            self.shared.bump("candidates")
             normalised = normalise_callsign(cand.callsign)
 
             # Re-check the shape after normalisation — stripping a prefix
             # overlay can leave something that is no longer a callsign, and the
             # server would reject it with a 400 anyway.
             if not is_lookupable(normalised):
-                self.stats["malformed"] += 1
+                self.shared.bump("malformed")
                 if self.args.verbose:
                     log.info("   – %s → %s, not lookupable", cand.callsign, normalised)
                 continue
@@ -690,9 +760,9 @@ class CallsignScanner:
             )
 
             if result.valid:
-                self.stats["validated"] += 1
+                self.shared.bump("validated")
                 if detection.agrees_with_dx_spot:
-                    self.stats["dx_agreements"] += 1
+                    self.shared.bump("dx_agreements")
                 is_repeat = normalised in self.confirmed
                 self.confirmed[normalised] = detection
                 self._announce(detection, is_repeat)
@@ -701,7 +771,7 @@ class CallsignScanner:
                 # spotting again — see SpotThrottle.
                 self._maybe_spot(detection)
             elif result.checked:
-                self.stats["rejected"] += 1
+                self.shared.bump("rejected")
                 if self.args.verbose:
                     log.info("   ✗ %s — not in QRZ", normalised)
             elif self.args.verbose:
@@ -752,7 +822,7 @@ class CallsignScanner:
         already shown in the CONFIRMED line, so it degrades to the tag alone
         when QRZ has no name on file.
         """
-        if self.spotter is None:
+        if self.shared.spotter is None:
             return
         # Literal matches (source="literal") are a whole callsign written out
         # verbatim in the transcript, not assembled token-by-token — stronger
@@ -785,7 +855,7 @@ class CallsignScanner:
 
         who = detection.name or detection.country or ""
         comment = f"{self.args.spot_tag} {who}".strip()
-        if self.spotter.submit(detection.frequency, detection.normalised, comment):
+        if self.shared.spotter.submit(detection.frequency, detection.normalised, comment):
             self.spot_throttle.record(detection.normalised, detection.frequency)
             if self.web:
                 self.web.push_spot(detection.normalised, detection.frequency, comment)
@@ -825,10 +895,12 @@ class CallsignScanner:
         )
 
     def _write(self, detection: Detection) -> None:
-        if self._log_file is None:
+        if self.shared.log_file is None:
             return
-        self._log_file.write(json.dumps(asdict(detection)) + "\n")
-        self._log_file.flush()
+        # One file, several workers.
+        with self.shared.log_lock:
+            self.shared.log_file.write(json.dumps(asdict(detection)) + "\n")
+            self.shared.log_file.flush()
 
     # -- Shutdown -----------------------------------------------------------
 
@@ -845,8 +917,9 @@ class CallsignScanner:
         self._running = False
 
     def shutdown(self) -> None:
-        log.info("Shutting down")
-        self.tracker.stop()
+        log.info("Shutting down worker %d", self.worker_id)
+        if self.worker_id == 0:
+            self.tracker.stop()
 
         # Whisper still holds buffered audio. Give it a moment to flush before
         # detaching, or the last segments of the run are lost.
@@ -871,10 +944,14 @@ class CallsignScanner:
             except Exception:
                 pass
             self.session.stop()
-        if self.spotter is not None:
-            self.spotter.stop()
-        if self._log_file is not None:
-            self._log_file.close()
+
+        # Shared resources are torn down once, by the same worker that set
+        # them up — another worker may still be draining.
+        if self.worker_id == 0:
+            if self.shared.spotter is not None:
+                self.shared.spotter.stop()
+            if self.shared.log_file is not None:
+                self.shared.log_file.close()
 
     def report(self) -> None:
         print("\n" + "=" * 68)
@@ -969,6 +1046,15 @@ def parse_args(argv=None):
                            "air, etc.). Once enough is heard this no longer "
                            "applies for the rest of the dwell. The frequency "
                            "stays in rotation and is retried on the next sweep.")
+    scan.add_argument("--parallel", type=int, default=1,
+                      help="Number of scanning sessions to run at once, each "
+                           "on its own frequency. Every one holds a Whisper "
+                           "slot for the whole run, and whisper.max_users "
+                           "defaults to 2 on the server — so 2 here consumes "
+                           "every slot and leaves none for web UI users. "
+                           "Raise whisper.max_users before going above 1. "
+                           "Ignored with --lock-freq, which pins a single "
+                           "frequency.")
     scan.add_argument("--silence-min-snr", type=float, default=40.0,
                       help="Peak SNR (dB) that must be seen within "
                            "--silence-timeout for a frequency to count as "
@@ -1139,27 +1225,63 @@ def main(argv=None) -> int:
         print("Not usable — fix the FAIL items above.\n")
         return 1
 
+    parallel = max(1, args.parallel)
+    if parallel > 1 and args.lock_freq is not None:
+        # Every worker would lock onto the same frequency and transcribe
+        # identical audio, burning a Whisper slot for nothing.
+        log.warning("--lock-freq pins one frequency; forcing --parallel 1")
+        parallel = 1
+
     web_ui = None
     if args.web_port:
-        web_ui = WebUI()
+        web_ui = WebUI(workers=parallel)
         web_ui.start(args.web_host, args.web_port)
 
-    scanner = CallsignScanner(args, web=web_ui)
+    base_url = f"{'https' if args.ssl else 'http'}://{args.host}:{args.port}"
+    shared = SharedState(args, base_url)
+    scanners = [
+        CallsignScanner(args, web=web_ui, worker_id=wid, shared=shared)
+        for wid in range(parallel)
+    ]
 
     def handle_signal(signum, frame):
         log.info("Interrupted")
-        scanner.stop()
+        for s in scanners:
+            s.stop()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
+    threads: List[threading.Thread] = []
     try:
-        if not scanner.start():
-            return 1          # the finally block below handles cleanup
-        scanner.run()
+        for s in scanners:
+            # Sequential start: worker 0 brings up the shared tracker, log
+            # file and cluster login, and each session must register before
+            # the next one opens its sockets.
+            if not s.start():
+                if s.worker_id == 0:
+                    return 1      # the finally block handles cleanup
+                log.error(
+                    "Worker %d failed to start — continuing with %d",
+                    s.worker_id, s.worker_id,
+                )
+                break
+            if parallel > 1:
+                log.info("Worker %d scanning", s.worker_id)
+            t = threading.Thread(target=s.run, name=f"scan-{s.worker_id}")
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
     finally:
-        scanner.shutdown()
-        scanner.report()
+        for s in reversed(scanners):     # worker 0 last: it owns the shared bits
+            s.stop()
+        for t in threads:
+            t.join(timeout=5.0)
+        for s in reversed(scanners):
+            s.shutdown()
+        scanners[0].report()
         if web_ui is not None:
             web_ui.stop()
 

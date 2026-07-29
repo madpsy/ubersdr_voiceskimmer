@@ -11,6 +11,13 @@ services:
       # UBERSDR_SSL: "1"
       # UBERSDR_PASS: ""
       #
+      # Scanning sessions to run at once, each on its own frequency (default 1).
+      # Every session holds a Whisper slot for as long as it runs, and the
+      # server's whisper.max_users defaults to 2 — so setting this to 2 uses
+      # every slot and leaves none for web UI users. Raise whisper.max_users
+      # on the server before going above 1.
+      # PARALLEL: "1"
+      #
       # Restrict to one or more bands, comma-separated (default: all bands)
       # BAND: "20m,40m"
       #

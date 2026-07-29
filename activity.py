@@ -118,6 +118,8 @@ class ActivityTracker:
         self.expiry = expiry
 
         self._targets: Dict[Tuple[str, int], Target] = {}
+        # Frequencies a worker is sitting on right now — see next_target.
+        self._claimed: Set[Tuple[str, int]] = set()
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -298,6 +300,12 @@ class ActivityTracker:
           tier 2  ignore the cooldown, but still refuse an immediate repeat
           tier 3  the last frequency, only when it is genuinely all there is
 
+        A frequency another worker is currently sitting on is excluded from
+        ALL of those tiers, including the last-resort one — two workers on the
+        same frequency would transcribe identical audio and waste a Whisper
+        slot, which is the scarcest thing here. When that leaves nothing, the
+        caller gets None and waits rather than doubling up.
+
         Args:
             exclude:  key of the frequency just visited; never chosen unless it
                       is the only target left
@@ -305,7 +313,9 @@ class ActivityTracker:
         """
         with self._lock:
             self._expire()
-            everything = list(self._targets.values())
+            everything = [
+                t for t in self._targets.values() if t.key not in self._claimed
+            ]
             if not everything:
                 return None
 
@@ -319,6 +329,19 @@ class ActivityTracker:
 
             pool = fresh or not_repeat or everything
             return max(pool, key=lambda t: t.priority())
+
+    def claim(self, target: Target) -> None:
+        """Mark a frequency as being scanned, so no other worker picks it."""
+        with self._lock:
+            self._claimed.add(target.key)
+
+    def release(self, target: Target) -> None:
+        with self._lock:
+            self._claimed.discard(target.key)
+
+    def claimed(self) -> Set[Tuple[str, int]]:
+        with self._lock:
+            return set(self._claimed)
 
     def mark_visited(self, target: Target) -> None:
         """Called once per dwell, by the hop loop."""

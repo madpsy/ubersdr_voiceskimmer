@@ -6,6 +6,10 @@
 #   UBERSDR_PORT          UberSDR port                          (default: 8080)
 #   UBERSDR_SSL           Set to 1 to use https/wss
 #   UBERSDR_PASS          Bypass password, if the instance needs one
+#   PARALLEL              Scanning sessions to run at once      (default: 1)
+#                         Each holds a Whisper slot for the whole run, and the
+#                         server's whisper.max_users defaults to 2 — so 2 here
+#                         uses every slot and leaves none for web UI users.
 #   BAND                  Comma-separated band list             e.g. 20m,40m
 #                         (default: all bands)
 #   DWELL                 Seconds per frequency                 (default: 30)
@@ -43,6 +47,7 @@ args=""
 [ "$UBERSDR_SSL" = "1"      ] && args="$args --ssl"
 [ -n "$UBERSDR_PASS"        ] && args="$args --password $UBERSDR_PASS"
 
+[ -n "$PARALLEL"            ] && args="$args --parallel $PARALLEL"
 [ -n "$BAND"                ] && args="$args --band $BAND"
 [ -n "$DWELL"                ] && args="$args --dwell $DWELL"
 [ -n "$MAX_DWELL"            ] && args="$args --max-dwell $MAX_DWELL"
