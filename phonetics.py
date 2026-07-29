@@ -346,6 +346,52 @@ def _letter_o_as_zero(text: str) -> Optional[str]:
     return shaped[0] if len(shaped) == 1 else None
 
 
+_DIGIT_GROUP_RE = re.compile(r"\d+")
+
+
+def _split_joined_callsigns(text: str) -> Optional[List[str]]:
+    """
+    Partition a run that ran two callsigns together.
+
+    Operators give both calls back to back constantly ("M7CEH, M0NSD") and
+    nothing between them breaks the run, so they arrive as one string. The
+    trim loop can only ever return ONE substring, and it finds a
+    shape-valid hybrid straddling the join before it finds either real
+    callsign — observed live: "Mike 7, Charlie Echo Hotel, Mike Zero
+    November" gave M7CEHM, which is neither station.
+
+    Returns every piece when `text` partitions EXACTLY into two or more
+    callsign-shaped parts with nothing left over, else None. That exactness
+    is what makes this safe: ordinary runs have a stray word on one end and
+    cannot partition, so they fall through to the trim loop unchanged.
+
+    Longest-first is what resolves the ambiguity. "M7CEHM0N" splits as both
+    M7CEH + M0N and M7CE + HM0N; requiring the remainder to parse as well
+    rules out the greedier M7CEHM (leaving an unparsable "0N"), and taking
+    the longest head that survives that check picks the first. The same rule
+    gets M0AB + G4RS right, where the greedy M0ABG leaves "4RS".
+    """
+    # Each callsign carries its own separating digit, so two of them means
+    # two digit groups; and the shortest possible pair is 3 + 3 characters.
+    if len(text) < 6 or len(_DIGIT_GROUP_RE.findall(text)) < 2:
+        return None
+
+    def parse(rest: str) -> Optional[List[str]]:
+        if is_callsign_shaped(rest):
+            return [rest]
+        # A callsign is 3-10 characters and the remainder needs at least 3.
+        for cut in range(min(len(rest) - 3, 10), 2, -1):
+            if not is_callsign_shaped(rest[:cut]):
+                continue
+            tail = parse(rest[cut:])
+            if tail is not None:
+                return [rest[:cut]] + tail
+        return None
+
+    parts = parse(text)
+    return parts if parts is not None and len(parts) >= 2 else None
+
+
 def _mapping_with_spelled(token: str, is_spelled: bool) -> Optional[Tuple[str, bool]]:
     """
     Map a token, taking into account whether Whisper capitalised it.
@@ -698,6 +744,42 @@ def extract_phonetic(
             suffix = SUFFIX_WORDS[tokens[i]]
 
         cued = any(pos in cues for pos in range(start, start + 2))
+
+        # Two callsigns given back to back arrive as one unbroken run, and
+        # the trim loop below would return a hybrid straddling the join
+        # rather than either real callsign. Tried first, and only when the
+        # whole run partitions exactly — see _split_joined_callsigns.
+        joined = _split_joined_callsigns("".join(chars))
+        if joined is not None:
+            run_strict, run_loose = _run_evidence(
+                tokens[start:i],
+                {p - start for p in spelled if start <= p < i},
+            )
+            # Scored on the run as a whole: it is one continuous spelling,
+            # and the pieces are only meaningful together — a partition that
+            # accounts for every character is itself the evidence that the
+            # split is real.
+            if 2 * run_strict + (2 / 3) * run_loose + (2 if cued else 0) >= 4:
+                confidence = round(
+                    min(0.25 + 0.10 * min(run_strict, 4) + (0.25 if cued else 0), 0.95),
+                    3,
+                )
+                for part_no, part in enumerate(joined):
+                    candidates.append(
+                        Candidate(
+                            callsign=part,
+                            source="phonetic",
+                            confidence=confidence,
+                            strict_tokens=run_strict,
+                            loose_tokens=run_loose,
+                            cued=cued,
+                            context=" ".join(tokens[max(0, start - 4):i + 2]),
+                            # The spoken suffix followed the last callsign
+                            # given, not every one in the run.
+                            suffix=suffix if part_no == len(joined) - 1 else "",
+                        )
+                    )
+                continue
 
         # Try the whole run first, then progressively trim from the left
         # and/or right. A run often has a leading stray ("...and four radio

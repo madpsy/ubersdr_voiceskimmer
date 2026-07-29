@@ -14,6 +14,7 @@ import unittest
 from phonetics import (
     _tokenise_cased,
     _letter_o_as_zero,
+    _split_joined_callsigns,
     extract_callsigns,
     is_callsign_shaped,
     is_lookupable,
@@ -698,6 +699,60 @@ class TestStrokeTruncatesTheSegment(unittest.TestCase):
         got = calls(text)
         self.assertIn("M0ABC", got)
         self.assertIn("G4RS", got)
+
+
+class TestTwoCallsignsRunTogether(unittest.TestCase):
+    """
+    Operators give both calls back to back and nothing between them breaks
+    the run, so they arrive as one string. The trim loop can only return one
+    substring, and it finds a shape-valid hybrid straddling the join before
+    either real callsign — observed live: "Mike 7, Charlie Echo Hotel, Mike
+    Zero November" gave M7CEHM, which is neither station.
+    """
+
+    def test_both_callsigns_recovered(self):
+        text = "Mike 7, Charlie Echo Hotel, Mike Zero November at Straight Delta."
+        got = confident_calls(text)
+        self.assertIn("M7CEH", got)
+        self.assertNotIn("M7CEHM", got)
+
+    def test_longest_head_that_leaves_a_valid_remainder_wins(self):
+        # M7CEHM0N splits as both M7CEH+M0N and M7CE+HM0N; the greedier
+        # M7CEHM leaves an unparsable "0N" and is ruled out.
+        self.assertEqual(_split_joined_callsigns("M7CEHM0N"), ["M7CEH", "M0N"])
+        # Here the greedy head M0ABG is the one that fails, leaving "4RS".
+        self.assertEqual(_split_joined_callsigns("M0ABG4RS"), ["M0AB", "G4RS"])
+        self.assertEqual(
+            _split_joined_callsigns("G4ABCM0XYZ"), ["G4ABC", "M0XYZ"]
+        )
+
+    def test_only_exact_partitions_are_split(self):
+        # Anything with a stray character on either end cannot partition and
+        # falls through to the trim loop unchanged.
+        for text in [
+            "M0ABC",        # a single callsign
+            "M7CEHM",       # the hybrid itself
+            "JD73",         # trailing sign-off number
+            "AND4RS",       # leading stray word
+            "4LVF30F4LVF",  # garbled run with no valid partition
+        ]:
+            self.assertIsNone(_split_joined_callsigns(text), text)
+
+    def test_run_of_two_in_one_breath(self):
+        text = "This is Mike Zero Alpha Bravo Golf Four Romeo Sugar"
+        got = confident_calls(text)
+        self.assertIn("M0AB", got)
+        self.assertIn("G4RS", got)
+
+    def test_spoken_suffix_goes_to_the_last_callsign_only(self):
+        cands = {
+            c.callsign: c
+            for c in extract_callsigns(
+                "Mike Zero Alpha Bravo Golf Four Romeo Sugar portable"
+            )
+        }
+        self.assertEqual(cands["G4RS"].suffix, "/P")
+        self.assertEqual(cands["M0AB"].suffix, "")
 
 
 class TestLiveMissRegressions(unittest.TestCase):
