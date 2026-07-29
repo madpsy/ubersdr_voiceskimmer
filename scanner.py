@@ -25,6 +25,7 @@ import signal
 import sys
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Set
 
@@ -172,6 +173,15 @@ class CallsignScanner:
         # mid-utterance (max_speech_duration_s forces a break every 15s with
         # no real pause). Reset to [] on every genuine hop in _dwell().
         self._segment_history: List[Segment] = []
+        # Completed segments already handled, keyed by exact text and the
+        # frequency they were credited to. Hopping sends reset_transcript to
+        # clear the SERVER's duplicate suppression — necessary so a repeated
+        # phrase on the new frequency is not swallowed as a duplicate of the
+        # old one — but that also unsuppresses audio still in flight from
+        # before the hop, which then arrives a second time. Observed live:
+        # one utterance logged under two frequencies a second apart and
+        # credited two corroboration hits, which defeats --spot-min-hits.
+        self._recent_completed: "OrderedDict[str, float]" = OrderedDict()
 
         self.spot_throttle = self.shared.spot_throttle
         self.timeline = FrequencyTimeline(pipeline_latency=args.pipeline_latency)
@@ -609,23 +619,21 @@ class CallsignScanner:
             marker = "✓" if segment.completed else "…"
             if self.args.verbose:
                 log.info("   %s %s", marker, segment.text)
-            if self.web:
-                # Best-effort band/freq context: attribution (below) only
-                # runs for completed segments, but the dashboard shows the
-                # in-progress line too, so tag with wherever we're currently
-                # sitting rather than waiting for attribution.
-                live = self.timeline.current()
-                self.web.push_transcript(
-                    self.worker_id,
-                    live.band if live else "", live.dial_freq if live else 0,
-                    segment.completed, segment.text,
-                )
 
             # Incomplete segments are re-sent repeatedly as Whisper's
             # transcription of the same utterance grows, and would inflate
             # the silence word-count if counted here — only completed
-            # segments go on to attribution, counting, and extraction.
+            # segments go on to attribution, counting, and extraction. The
+            # in-progress line is still shown, tagged with where we are now,
+            # which is the best available for audio still arriving.
             if not segment.completed:
+                if self.web:
+                    live = self.timeline.current()
+                    self.web.push_transcript(
+                        self.worker_id,
+                        live.band if live else "", live.dial_freq if live else 0,
+                        False, segment.text,
+                    )
                 continue
 
             duration = max(segment.end - segment.start, 0.0)
@@ -648,6 +656,41 @@ class CallsignScanner:
                         "   ~ segment spans a hop; crediting %.3f MHz (%.0f%%)",
                         target.dial_freq / 1e6, attribution.overlap_fraction * 100,
                     )
+
+            # Byte-identical text arriving twice within a couple of pipeline
+            # latencies is the same utterance re-sent, not the station saying
+            # it again — Whisper rarely renders a genuine repeat identically.
+            #
+            # Keyed on the text alone, not on text-and-frequency: the
+            # duplicate often straddles the hop, so the two copies attribute
+            # to different frequencies and a frequency-aware key would miss
+            # precisely the case this exists to catch. One worker cannot be
+            # on two frequencies at once, so identical text seconds apart is
+            # the same audio whichever side of the hop it lands.
+            dup_window = max(2 * self.args.pipeline_latency, 4.0)
+            dup_key = segment.text
+            now = time.time()
+            for key, seen_at in list(self._recent_completed.items()):
+                if now - seen_at > dup_window:
+                    self._recent_completed.pop(key, None)
+            if dup_key in self._recent_completed:
+                if self.args.verbose:
+                    log.info("   ~ duplicate segment after hop, ignoring")
+                continue
+            self._recent_completed[dup_key] = now
+            while len(self._recent_completed) > 64:
+                self._recent_completed.popitem(last=False)
+
+            # Shown only once the segment is known to be genuinely new, and
+            # labelled with where its AUDIO came from rather than where the
+            # worker is sitting now — Whisper lags its input by seconds, so a
+            # segment arriving just after a hop belongs to the frequency we
+            # have already left.
+            if self.web:
+                self.web.push_transcript(
+                    self.worker_id, target.band, target.dial_freq,
+                    True, segment.text,
+                )
 
             seen: Set[str] = set()
             detections = self._process(segment, target, attribution, seen)
