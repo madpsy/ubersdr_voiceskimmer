@@ -361,7 +361,25 @@
   // follows the scanner as it hops rather than being a separate receiver.
   // Starting it unmutes that session server-side; stopping re-mutes it, so
   // the src is cleared (not just paused) to actually drop the connection.
+  // Listening is exclusive across panels. Two at once would overlap two
+  // stations in the same pair of ears, and would hold both sessions unmuted
+  // — each one only re-mutes when its own listener disconnects.
+  //
+  // Every call takes a generation token. play() rejects asynchronously, and
+  // stopping a panel is itself a common cause of that rejection, so without
+  // the token a late failure from the panel you just switched away from
+  // would switch off the one you switched to.
+  let listenGeneration = 0;
+
   function setListening(p, on) {
+    const gen = ++listenGeneration;
+
+    if (on) {
+      for (const other of panels.values()) {
+        if (other !== p && other.listening) stopListening(other);
+      }
+    }
+
     p.listening = on;
     if (on) {
       // Each worker is its own session, so its own audio endpoint.
@@ -369,16 +387,35 @@
       // a stale buffered one.
       p.audio.src = `api/audio/${p.id}?t=` + Date.now();
       p.audio.play().catch((err) => {
+        // Ignore if anything has changed since — this rejection is stale.
+        if (gen !== listenGeneration) return;
         console.error("audio play failed", err);
         setListening(p, false);
       });
     } else {
+      stopListening(p);
+    }
+    paintListen(p);
+  }
+
+  // Tearing down the element is what actually ends the HTTP request, which is
+  // what makes the server drop the listener and re-mute that session. Pausing
+  // alone would leave the connection open and the session unmuted.
+  function stopListening(p) {
+    p.listening = false;
+    try {
       p.audio.pause();
       p.audio.removeAttribute("src");
       p.audio.load();
+    } catch (err) {
+      console.error("stopping audio failed", err);
     }
-    p.listen.classList.toggle("on", on);
-    p.listen.textContent = on ? "🔊 Listening" : "🔈 Listen";
+    paintListen(p);
+  }
+
+  function paintListen(p) {
+    p.listen.classList.toggle("on", p.listening);
+    p.listen.textContent = p.listening ? "🔊 Listening" : "🔈 Listen";
   }
 
   function renderAudioAvailable(p, available) {
