@@ -64,10 +64,10 @@ services:
       # MIN_CALLSIGN_LENGTH: "4"
       #
       # Decodes of the same callsign on the same frequency required before a
-      # spot goes out (default 1). Above 1 trades latency for confidence — a
+      # spot goes out (default 2). Above 1 trades latency for confidence — a
       # wrong callsign assembled from one garbled pass is unlikely to be
       # assembled identically a second time on the same frequency.
-      # SPOT_MIN_HITS: "1"
+      # SPOT_MIN_HITS: "2"
       #
       # Dashboard port (0 disables it)
       # WEB_PORT: "6098"

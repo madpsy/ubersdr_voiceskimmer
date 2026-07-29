@@ -1253,10 +1253,11 @@ def parse_args(argv=None):
                          "\"[Voice]\"), e.g. \"[Voice] <QRZ name>\" — "
                          "distinguishes these from manually-submitted or "
                          "CW-skimmer spots in anyone else's cluster view.")
-    dx.add_argument("--spot-min-hits", type=int, default=1,
+    dx.add_argument("--spot-min-hits", type=int, default=2,
                     help="Times the same callsign must be decoded on the same "
-                         "frequency before it is spotted (default 1 — spot on "
-                         "the first decode). Above 1 this trades latency for "
+                         "frequency before it is spotted (default 2). Set to 1 "
+                         "to spot on the first decode. Above 1 this trades "
+                         "latency for "
                          "confidence: the extractor can assemble a "
                          "plausible-but-wrong callsign from one garbled pass, "
                          "but is unlikely to invent the same wrong one twice "

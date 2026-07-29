@@ -180,7 +180,7 @@ callsign and password to log in with.
 | `--spot-cooldown` | 900 s | Re-spot the same (callsign, frequency) once this elapses — a station still active later is itself useful information |
 | `--spot-freq-tolerance` | 100 Hz | Frequency tolerance for the cooldown, since the detector's dial-frequency estimate can wobble slightly between hearings |
 | `--spot-max-entries` | 1000 | Cap on remembered cooldown entries, oldest/least-recent evicted first |
-| `--spot-min-hits` | 1 | Decodes of the same callsign on the same frequency required before spotting. Above 1 trades latency for confidence — a wrong callsign assembled from one garbled pass is unlikely to be assembled identically again |
+| `--spot-min-hits` | 2 | Decodes of the same callsign on the same frequency required before spotting. Trades latency for confidence — a wrong callsign assembled from one garbled pass is unlikely to be assembled identically again. Set to 1 to spot on the first decode |
 | `--spot-tag` | `[Voice]` | Tag prefixed to every spot comment |
 
 Comments are tagged `<tag> <QRZ name>` (default tag `[Voice]`, truncated to
@@ -245,7 +245,7 @@ Every `scanner.py` flag has an environment-variable equivalent (see
 | `LOCK_FREQ` / `LOCK_MODE` | `--lock-freq`/`--lock-mode` | — (hop normally) |
 | `STOCK_WHISPER` | `--stock-whisper` | off |
 | `SPOT` / `SPOTTER_CALL` / `SPOTTER_PASS` | `--spot`/`--spotter-call`/`--spotter-pass` | off / — / — |
-| `SPOT_MIN_HITS` | `--spot-min-hits` | `1` |
+| `SPOT_MIN_HITS` | `--spot-min-hits` | `2` |
 | `PARALLEL` | `--parallel` | `1` (see below) |
 | `SPOT_TAG` | `--spot-tag` | `[Voice]` |
 | `WEB_PORT` | `--web-port` | `6098` (`0` disables) |

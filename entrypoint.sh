@@ -35,7 +35,7 @@
 #   MIN_CALLSIGN_LENGTH   Minimum length for a phonetically-assembled callsign
 #                         to be looked up at all (default: 4)
 #   SPOT_MIN_HITS         Decodes of the same callsign on the same frequency
-#                         required before spotting (default: 1)
+#                         required before spotting (default: 2)
 #   WEB_PORT              Dashboard port                          (default: 6098, 0 disables)
 #   OUTPUT                JSONL detection log path                (default: /data/detections.jsonl)
 #   VERBOSE               Set to 1 for verbose logging
