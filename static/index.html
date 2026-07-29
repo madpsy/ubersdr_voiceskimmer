@@ -50,6 +50,16 @@
   #current .dx { color: var(--star); }
   #uptime { margin-left: auto; color: var(--dim); font-size: 12px; white-space: nowrap; }
 
+  #receiver {
+    font-size: 12px;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #receiver .call { color: var(--text); font-weight: 600; }
+  #receiver .sep { color: var(--border); margin: 0 6px; }
+
   #signal {
     font-size: 12px;
     color: var(--dim);
@@ -205,6 +215,7 @@
 
 <header>
   <h1>Voice Skimmer</h1>
+  <div id="receiver"></div>
   <div id="current"><span class="empty">waiting for a target…</span></div>
   <div id="signal" title="Live SNR measured from the audio stream. A peak above the threshold keeps the scanner on this frequency."></div>
   <button id="listen" disabled title="Hear what the scanner is tuned to — follows it as it hops">🔈 Listen</button>

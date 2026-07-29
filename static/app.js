@@ -23,6 +23,7 @@
     listen: document.getElementById("listen"),
     audio: document.getElementById("audio-el"),
     signal: document.getElementById("signal"),
+    receiver: document.getElementById("receiver"),
   };
 
   // Client-side copies, keyed the same way the server keeps them, so each
@@ -75,6 +76,31 @@
       `${esc((current.mode || "").toUpperCase())} &nbsp; ` +
       `SNR ${(current.snr ?? 0).toFixed(1)} dB &nbsp; conf ${(current.confidence ?? 0).toFixed(2)}${dx}`;
   }
+
+  // -- Which receiver is this? ----------------------------------------------
+
+  // /api/description belongs to UberSDR itself, not this addon, so it needs a
+  // root-relative URL. A bare "api/description" would resolve against the
+  // <base> tag and hit this addon under its proxy prefix instead. Only
+  // reachable when served through the proxy — opened directly on the addon's
+  // own port there is no UberSDR at the root, so the header is simply left
+  // empty rather than showing an error.
+  function loadReceiver() {
+    fetch("/api/description")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        const rx = (d && d.receiver) || {};
+        const bits = [rx.name, rx.location].filter(Boolean).map(esc);
+        if (!rx.callsign && !bits.length) return;
+        els.receiver.innerHTML =
+          (rx.callsign ? `<span class="call">${esc(rx.callsign)}</span>` : "") +
+          (rx.callsign && bits.length ? '<span class="sep">·</span>' : "") +
+          bits.join('<span class="sep">·</span>');
+        if (rx.callsign) document.title = `${rx.callsign} — Voice Skimmer`;
+      })
+      .catch(() => {});   // not fatal; the dashboard is fine without it
+  }
+  loadReceiver();
 
   // -- Live signal ----------------------------------------------------------
 
