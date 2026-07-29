@@ -29,17 +29,91 @@ addons' web UIs, e.g. ubersdr_lightning's /api/status + /api/events):
 
 import json
 import logging
+import math
 import queue
 import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from flask import Flask, Response, jsonify, request
 
 from phonetics import explain
+
+
+def client_ip(req) -> str:
+    """
+    The real client address behind UberSDR's addon proxy.
+
+    Mirrors realClientIPDebug in ubersdr_dxcluster/terminal.go, which is the
+    established convention for addons: X-Real-IP first (the proxy sets it to
+    a single authoritative address), then the first entry of
+    X-Forwarded-For, then the socket peer for a direct connection.
+
+    Trusting those headers is safe here for the same reason it is there. The
+    addon proxy DELETES any client-supplied X-Real-IP and X-Forwarded-For
+    before setting its own (addon_proxy.go, "Strip client-supplied proxy
+    headers before we set our own authoritative values"), and the container
+    publishes its port only on the internal sdr-network — so nothing that
+    can reach us is in a position to forge them. If this were ever exposed
+    directly to the internet, these headers would become attacker-controlled
+    and this function would need a trusted-proxy check like the main
+    server's getClientIP.
+    """
+    xri = (req.headers.get("X-Real-IP") or "").strip()
+    if xri:
+        return xri
+    xff = req.headers.get("X-Forwarded-For") or ""
+    if xff:
+        return xff.split(",")[0].strip()
+    return req.remote_addr or "unknown"
+
+
+class RateLimiter:
+    """
+    At most one request per `interval` per key.
+
+    Only a SUCCESSFUL request advances the clock, so a client hammering the
+    endpoint still gets exactly one through per interval rather than being
+    pushed further out by its own rejected attempts.
+
+    Bounded: entries older than the interval are dead weight, so they are
+    swept once the map grows past `max_entries`. If a genuine flood from
+    many distinct addresses leaves nothing to sweep, the oldest half goes
+    anyway — losing a little rate-limit state under attack is much better
+    than growing the map without limit in a long-running container.
+    """
+
+    def __init__(self, interval: float = 1.0, max_entries: int = 10000):
+        self.interval = interval
+        self.max_entries = max_entries
+        # monotonic, not wall clock: this measures an elapsed interval, and
+        # an NTP step must not hand out a free request or a long lockout.
+        self._last: Dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> Tuple[bool, float]:
+        """Returns (allowed, seconds until the next request is allowed)."""
+        now = time.monotonic()
+        with self._lock:
+            last = self._last.get(key)
+            if last is not None and now - last < self.interval:
+                return False, self.interval - (now - last)
+            self._last[key] = now
+            if len(self._last) > self.max_entries:
+                self._prune(now)
+            return True, 0.0
+
+    def _prune(self, now: float) -> None:
+        """Caller holds the lock."""
+        for key in [k for k, t in self._last.items() if now - t >= self.interval]:
+            del self._last[key]
+        if len(self._last) > self.max_entries:
+            oldest = sorted(self._last, key=lambda k: self._last[k])
+            for key in oldest[: len(oldest) // 2]:
+                del self._last[key]
 from werkzeug.serving import make_server
 
 log = logging.getLogger(__name__)
@@ -176,6 +250,10 @@ class WebUI:
         # say "extracted but dropped for scoring 0.30" rather than leaving the
         # user to guess which gate a callsign died at.
         self.gates: Dict[str, Any] = gates or {}
+        # /api/explain is the one endpoint that does real work on
+        # caller-supplied input, so it is the one worth pacing. The rest
+        # serve state the scanner has already computed.
+        self.explain_limiter = RateLimiter(interval=1.0)
 
         # Everything a single scanning session owns is keyed by worker id.
         # Confirmed callsigns, spots and stats stay shared — they are results,
@@ -275,6 +353,19 @@ class WebUI:
             transcript line is arbitrary user-visible text that has no
             business in a URL or an access log.
             """
+            allowed, retry_after = self.explain_limiter.allow(client_ip(request))
+            if not allowed:
+                resp = jsonify({
+                    "error": "rate limited — one analysis per second",
+                    "retry_after": round(retry_after, 2),
+                })
+                resp.status_code = 429
+                # Whole seconds: RFC 9110 delay-seconds is an integer, and
+                # rounding up rather than down avoids sending the client
+                # straight back into another rejection.
+                resp.headers["Retry-After"] = str(math.ceil(retry_after)) or "1"
+                return resp
+
             payload = request.get_json(silent=True) or {}
             text = payload.get("text", "")
             if not isinstance(text, str):

@@ -415,11 +415,21 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
     })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+      .then((r) => {
+        // The endpoint allows one analysis per second per address. Clicking
+        // down a column of lines is easy to do faster than that, so say so
+        // plainly instead of showing a status code.
+        if (r.status === 429) return Promise.reject(new Error("__RATE__"));
+        if (!r.ok) return Promise.reject(new Error("HTTP " + r.status));
+        return r.json();
+      })
       .then(renderExplain)
       .catch((err) => {
-        els.explainBody.innerHTML =
-          `<p class="ex-note">Could not analyse this line: ${esc(String(err))}</p>`;
+        const msg =
+          String(err.message) === "__RATE__"
+            ? "One line per second, please — click again in a moment."
+            : `Could not analyse this line: ${esc(String(err))}`;
+        els.explainBody.innerHTML = `<p class="ex-note">${msg}</p>`;
       });
   }
 
