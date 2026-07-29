@@ -88,6 +88,21 @@ push() {
 
     echo "Pushed multi-platform manifest: $IMAGE"
 
+    # Refresh the local tag to match what was just pushed. buildx uses the
+    # docker-container driver, which exports the manifest straight to the
+    # registry and never loads it into the local image store — so without
+    # this the local $IMAGE stays at whatever the last plain build produced.
+    # Anything run locally afterwards (docker run, docker compose up without
+    # a pull) would silently use that stale image. Layers are already cached
+    # from the build above, so this costs seconds.
+    echo "Loading $PLATFORM into the local image store..."
+    docker build \
+        --platform "$PLATFORM" \
+        --tag "$IMAGE" \
+        "$TMPCTX"
+
+    echo "Local image now matches the pushed one."
+
     # Push whatever is already committed — but never commit on the user's
     # behalf. This previously ran "git add -A" and committed everything with
     # a generic "Release" message, which silently swallowed real commit
