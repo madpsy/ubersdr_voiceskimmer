@@ -185,12 +185,28 @@ global.fetch = () => new Promise(() => {});
 
 // MinimalRadio stand-in: records calls so the preview wiring can be asserted
 // without a WebSocket or an AudioContext.
+global.WebSocket = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 };
 global.__radioCalls = [];
+// Models the part of MinimalRadio the preview logic actually depends on:
+// isPlaying flips only AFTER the socket opens, and ws exists while connecting.
+global.__holdConnecting = false;
 global.MinimalRadio = class {
-  constructor() { this.isPlaying = false; global.__radioCalls.push(["new"]); }
-  startPreview(f, m) { this.isPlaying = true; global.__radioCalls.push(["start", f, m]); return Promise.resolve(); }
-  changeFrequency(f, m) { global.__radioCalls.push(["tune", f, m]); }
-  stopPreview() { this.isPlaying = false; global.__radioCalls.push(["stop"]); return Promise.resolve(); }
+  constructor() { this.isPlaying = false; this.ws = null; global.__radioCalls.push(["new"]); }
+  startPreview(f, m) {
+    global.__radioCalls.push(["start", f, m]);
+    this.currentFrequency = f;
+    this.ws = { readyState: WebSocket.CONNECTING };
+    if (global.__holdConnecting) return new Promise(() => {});   // never opens
+    this.ws.readyState = WebSocket.OPEN;
+    this.isPlaying = true;
+    return Promise.resolve();
+  }
+  changeFrequency(f, m) { this.currentFrequency = f; global.__radioCalls.push(["tune", f, m]); }
+  stopPreview() {
+    this.isPlaying = false; this.ws = null;
+    global.__radioCalls.push(["stop"]);
+    return Promise.resolve();
+  }
 };
 
 // Leaflet is absent here on purpose — initMap must degrade cleanly when the
@@ -428,6 +444,41 @@ check("activity rows preview too", () => {
   // One shared stream: the other panels' buttons arm as well.
   assert.strictEqual(byId["confirmed-stop"].disabled, false);
   stopRowAudioForTest();
+});
+
+check("switching rows retunes instead of reconnecting", () => {
+  stopRowAudioForTest();
+  const rows = T.els.confirmedBody.querySelectorAll("tr");
+  const targets = T.els.targetsBody.querySelectorAll("tr");
+  global.__radioCalls.length = 0;
+  T.els.confirmedBody.fire("click", { target: rows[0] });      // first: connect
+  T.els.targetsBody.fire("click", { target: targets[0] });     // second: retune
+  const kinds = global.__radioCalls.filter((c) => c[0] !== "new").map((c) => c[0]);
+  assert.deepStrictEqual(kinds, ["start", "tune"],
+    `expected one start then a tune, got ${JSON.stringify(global.__radioCalls)}`);
+  stopRowAudioForTest();
+});
+
+check("a click while still connecting retunes, not a second socket", () => {
+  // radio.isPlaying is false throughout here — the old check read that and
+  // would have opened a second WebSocket over the one in flight.
+  stopRowAudioForTest();
+  global.__holdConnecting = true;
+  try {
+    const rows = T.els.confirmedBody.querySelectorAll("tr");
+    const targets = T.els.targetsBody.querySelectorAll("tr");
+    global.__radioCalls.length = 0;
+    T.els.confirmedBody.fire("click", { target: rows[0] });
+    T.els.targetsBody.fire("click", { target: targets[0] });
+    const starts = global.__radioCalls.filter((c) => c[0] === "start");
+    const tunes = global.__radioCalls.filter((c) => c[0] === "tune");
+    assert.strictEqual(starts.length, 1, "opened more than one session");
+    assert.strictEqual(tunes.length, 1, "did not retune the pending session");
+    assert.strictEqual(tunes[0][1], 14226000);
+  } finally {
+    global.__holdConnecting = false;
+    stopRowAudioForTest();
+  }
 });
 
 check("the Stop button in the title bar ends it", () => {

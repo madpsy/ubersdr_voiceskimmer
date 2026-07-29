@@ -722,15 +722,27 @@
 
     const mode = (row.mode || "").toLowerCase() ||
                  (row.freq < 10000000 ? "lsb" : "usb");
-    const wasPlaying = !!playingKey;
     playingKey = row.key;
     paintRowAudio();
 
     try {
       if (!radio) radio = new MinimalRadio();
-      if (wasPlaying && radio.isPlaying) {
-        // Retune the open session rather than tearing it down and building
-        // another — the reconnect is audible and costs a fresh /connection.
+
+      // Retune the existing socket rather than tearing it down and building
+      // another: the reconnect is audible and costs a fresh /connection.
+      //
+      // Asked of the socket rather than radio.isPlaying, which only becomes
+      // true AFTER the connection completes. Clicking a second row while the
+      // first was still connecting would read as "not playing" and open a
+      // second WebSocket over the top of the one in flight. CONNECTING counts
+      // as retunable because changeFrequency just updates the pending
+      // frequency, and the socket's own onopen sends the tune from it — so a
+      // click mid-connect lands on the right frequency with one session.
+      const ws = radio.ws;
+      const retunable = ws && (ws.readyState === WebSocket.OPEN ||
+                               ws.readyState === WebSocket.CONNECTING);
+
+      if (retunable) {
         radio.changeFrequency(row.freq, mode);
       } else {
         Promise.resolve(radio.startPreview(row.freq, mode)).catch((err) => {
