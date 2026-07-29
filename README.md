@@ -166,7 +166,7 @@ exact frequency, so on a quiet instance expect zeroes.
 | `--band 20m,40m` | all | Restrict to one or more bands (comma-separated) |
 | `--parallel` | 1 | Scanning sessions to run at once, each on its own frequency. Every one holds a Whisper slot, and the server's `whisper.max_users` defaults to **2** — so 2 here uses every slot and leaves none for web UI users |
 | `--dwell` | 30 s | Base listen time per frequency (~2 VAD segments) |
-| `--max-dwell` | 180 s | Ceiling, so a busy net cannot hold the scanner |
+| `--max-dwell` | 60 s | Ceiling, so a busy net cannot hold the scanner. The default allows `--dwell` plus one `--dwell-extension` |
 | `--silence-timeout` | 10 s | Move on early if nothing is heard at all — dead air, not a real dwell |
 | `--dwell-extension` | 30 s | Extra time when something callsign-shaped is heard but not yet validated |
 | `--revisit-cooldown` | 120 s | How long before a frequency may be revisited |
@@ -379,7 +379,7 @@ Every `scanner.py` flag has an environment-variable equivalent (see
 |---|---|---|
 | `UBERSDR_HOST` / `UBERSDR_PORT` / `UBERSDR_SSL` / `UBERSDR_PASS` | `--host`/`--port`/`--ssl`/`--password` | `ubersdr` / `8080` / off / — |
 | `BAND` | `--band` | all bands |
-| `DWELL` / `MAX_DWELL` | `--dwell`/`--max-dwell` | `30` / `180` |
+| `DWELL` / `MAX_DWELL` | `--dwell`/`--max-dwell` | `30` / `60` |
 | `MIN_SNR` / `MIN_CONFIDENCE` | `--min-snr`/`--min-confidence` | `8` / `0.7` |
 | `LOCK_FREQ` / `LOCK_MODE` | `--lock-freq`/`--lock-mode` | — (hop normally) |
 | `STOCK_WHISPER` | `--stock-whisper` | off |

@@ -361,7 +361,7 @@ class CallsignScanner:
             # Stats and the band/freq activity table need to stay live
             # regardless of dwell length — --progress-interval (5 min
             # default) is far too coarse for a dashboard, and a single dwell
-            # can run for --max-dwell (180s) before the main loop ticks
+            # can run for --max-dwell before the main loop ticks
             # again. A small dedicated thread keeps them fresh on their own
             # short cadence instead.
             self._web_stats_thread = threading.Thread(
@@ -1144,9 +1144,13 @@ def parse_args(argv=None):
                            "heard but not yet QRZ-validated. A validated "
                            "callsign does NOT extend the dwell — the scanner "
                            "moves on immediately instead.")
-    scan.add_argument("--max-dwell", type=float, default=180.0,
+    scan.add_argument("--max-dwell", type=float, default=60.0,
                       help="Hard ceiling on time spent on one frequency, "
-                           "however much is being heard there")
+                           "however much is being heard there. At the default "
+                           "this allows the base --dwell plus one "
+                           "--dwell-extension; raise it to give a busy "
+                           "frequency more chances to resolve a callsign, at "
+                           "the cost of visiting fewer frequencies")
     scan.add_argument("--silence-timeout", type=float, default=10.0,
                       help="Move on early if fewer than --silence-min-words "
                            "have been transcribed within this many seconds of "
@@ -1358,6 +1362,18 @@ def main(argv=None) -> int:
         # identical audio, burning a Whisper slot for nothing.
         log.warning("--lock-freq pins one frequency; forcing --parallel 1")
         parallel = 1
+
+    # The ceiling is applied as min(max(dwell, extended), max_dwell), so a
+    # max_dwell below dwell silently truncates the BASE dwell rather than only
+    # capping the extensions. Easy to trip over now the default ceiling is 60
+    # rather than 180 — someone lengthening --dwell for a slow net would get a
+    # shorter dwell than they asked for, with nothing to say why.
+    if args.max_dwell < args.dwell:
+        log.warning(
+            "--max-dwell %.0fs is below --dwell %.0fs, so each frequency is "
+            "held for %.0fs, not %.0fs",
+            args.max_dwell, args.dwell, args.max_dwell, args.dwell,
+        )
 
     web_ui = None
     if args.web_port:

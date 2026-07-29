@@ -21,9 +21,16 @@ services:
       # Restrict to one or more bands, comma-separated (default: all bands)
       # BAND: "20m,40m"
       #
-      # Dwell tuning (seconds)
+      # Dwell tuning (seconds). A frequency is held for DWELL; anything
+      # callsign-shaped that has not validated yet pushes that out by
+      # DWELL_EXTENSION, and MAX_DWELL is the hard ceiling however much is
+      # being heard. A validated callsign ends the dwell immediately.
+      # Setting MAX_DWELL below DWELL truncates the base dwell, not just the
+      # extensions — the scanner warns if you do.
       # DWELL: "30"
-      # MAX_DWELL: "180"
+      # MAX_DWELL: "60"
+      # DWELL_EXTENSION: "30"
+      # REVISIT_COOLDOWN: "120"
       #
       # Ignore weak/uncertain voice activity
       # MIN_SNR: "8"
@@ -39,6 +46,23 @@ services:
       # sits around 33-34 dB and peaks below 38, an active one peaks past 40.
       # SILENCE_MIN_SNR: "40"
       # SILENCE_TIMEOUT: "10"
+      #
+      # Fallback for servers that send no signal data (version 1, or radiod
+      # had no channel status): count transcribed words instead. A poor
+      # proxy — Whisper hallucinates stock phrases on dead air — so it is
+      # only used when the direct measurement is unavailable.
+      # SILENCE_MIN_WORDS: "3"
+      #
+      # Extraction and lookup
+      # MIN_EXTRACT_CONFIDENCE: "0.4"     # raise for precision, lower for recall
+      # MIN_CALLSIGN_LENGTH: "4"          # gates the QRZ lookup, not just spotting
+      #
+      # Set to 6 if this instance is NOT on a bypassed IP — the default lookup
+      # limit is 10/minute and you will otherwise see 429s and unvalidated
+      # candidates. Check with: scanner.py --check
+      # LOOKUP_INTERVAL: "6"
+      #
+      # PROGRESS_INTERVAL: "60"
       #
       # Stick to one exact frequency instead of hopping (for testing)
       # LOCK_FREQ: "7200000"

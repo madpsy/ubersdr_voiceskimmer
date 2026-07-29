@@ -13,13 +13,22 @@
 #   BAND                  Comma-separated band list             e.g. 20m,40m
 #                         (default: all bands)
 #   DWELL                 Seconds per frequency                 (default: 30)
-#   MAX_DWELL             Hard ceiling per frequency             (default: 180)
+#   MAX_DWELL             Hard ceiling per frequency             (default: 60)
+#   DWELL_EXTENSION       Extra seconds when something callsign-shaped is heard
+#                         but has not validated yet                (default: 30)
+#   REVISIT_COOLDOWN      Seconds before a frequency may be revisited (default: 120)
 #   MIN_SNR               Ignore activity below this SNR         (default: 8)
 #   MIN_CONFIDENCE        Ignore activity below this confidence   (default: 0.7)
 #   SILENCE_MIN_SNR       Peak SNR (dB) within SILENCE_TIMEOUT for a frequency
 #                         to count as active (default: 40). Measured from the
 #                         audio frame headers, independent of transcription.
 #   SILENCE_TIMEOUT       Seconds to wait for that peak before moving on (default: 10)
+#   SILENCE_MIN_WORDS     Fallback word count when the server sends no signal
+#                         data (version 1, or no channel status)   (default: 3)
+#   MIN_EXTRACT_CONFIDENCE  Extractor confidence gate, 0-1         (default: 0.4)
+#   LOOKUP_INTERVAL       Seconds between QRZ lookups — set to 6 if this
+#                         instance is not on a bypassed IP          (default: 0)
+#   PROGRESS_INTERVAL     Seconds between progress lines           (default: 60)
 #   LOCK_FREQ             Stick to one frequency (Hz) instead of hopping
 #   LOCK_MODE             Mode for LOCK_FREQ                     (default: usb)
 #   PROMPT                Custom Whisper initial prompt
@@ -56,12 +65,19 @@ args=""
 [ -n "$BAND"                ] && args="$args --band $BAND"
 [ -n "$DWELL"                ] && args="$args --dwell $DWELL"
 [ -n "$MAX_DWELL"            ] && args="$args --max-dwell $MAX_DWELL"
+[ -n "$DWELL_EXTENSION"      ] && args="$args --dwell-extension $DWELL_EXTENSION"
+[ -n "$REVISIT_COOLDOWN"     ] && args="$args --revisit-cooldown $REVISIT_COOLDOWN"
 [ -n "$MIN_SNR"              ] && args="$args --min-snr $MIN_SNR"
 [ -n "$MIN_CONFIDENCE"       ] && args="$args --min-confidence $MIN_CONFIDENCE"
 [ -n "$SILENCE_MIN_SNR"      ] && args="$args --silence-min-snr $SILENCE_MIN_SNR"
 [ -n "$SILENCE_TIMEOUT"      ] && args="$args --silence-timeout $SILENCE_TIMEOUT"
+[ -n "$SILENCE_MIN_WORDS"    ] && args="$args --silence-min-words $SILENCE_MIN_WORDS"
 [ -n "$LOCK_FREQ"            ] && args="$args --lock-freq $LOCK_FREQ"
 [ -n "$LOCK_MODE"            ] && args="$args --lock-mode $LOCK_MODE"
+
+[ -n "$MIN_EXTRACT_CONFIDENCE" ] && args="$args --min-extract-confidence $MIN_EXTRACT_CONFIDENCE"
+[ -n "$LOOKUP_INTERVAL"      ] && args="$args --lookup-interval $LOOKUP_INTERVAL"
+[ -n "$PROGRESS_INTERVAL"    ] && args="$args --progress-interval $PROGRESS_INTERVAL"
 
 [ -n "$ASR_LANGUAGE"         ] && args="$args --asr-language $ASR_LANGUAGE"
 [ "$STOCK_WHISPER" = "1"     ] && args="$args --stock-whisper"
