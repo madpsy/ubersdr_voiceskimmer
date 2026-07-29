@@ -96,6 +96,39 @@
     return d.innerHTML;
   }
 
+  // -- Band colours ---------------------------------------------------------
+
+  // Wavelength order, so neighbouring bands never share a colour and the
+  // assignment is self-evident rather than arbitrary. The bands the server
+  // never reports voice activity for (2200m, 630m, 30m — EXCLUDED_BANDS in
+  // activity.py) are left out so they do not consume a colour.
+  //
+  // Only eight colours, so this wraps: 160m and 10m share one, 80m and 6m,
+  // and so on. Deliberate — a pairing that far apart in wavelength is
+  // unlikely to be open at the same time, and the band is written on the row
+  // regardless. The colour is for grouping at a glance, not identification.
+  const BAND_ORDER = [
+    "160m", "80m", "60m", "40m", "20m", "17m",
+    "15m", "12m", "10m", "6m", "4m", "2m", "70cm",
+  ];
+  const BAND_COLOURS = 8;
+
+  function bandClass(band) {
+    if (!band) return "";
+    const key = String(band).toLowerCase();
+    let idx = BAND_ORDER.indexOf(key);
+    if (idx < 0) {
+      // A band this list does not know — still give it a stable colour
+      // rather than leaving the row unmarked among coloured ones.
+      let h = 0;
+      for (let i = 0; i < key.length; i++) {
+        h = (h * 31 + key.charCodeAt(i)) >>> 0;
+      }
+      idx = h;
+    }
+    return "band-c" + (idx % BAND_COLOURS);
+  }
+
   // esc() is only safe for text content: innerHTML leaves quotes alone, so a
   // value interpolated into an attribute needs them handled too or a QRZ name
   // containing a double quote breaks out of it.
@@ -323,7 +356,7 @@
     const atBottom = scrolledToBottom(p);
 
     const line = document.createElement("div");
-    line.className = "final";
+    line.className = ("final " + bandClass(entry.band)).trim();
     line.innerHTML = lineHTML(entry, "✓");
     // The text is carried on the element rather than looked up later: lines
     // are evicted as the transcript scrolls, and the click has to explain
@@ -354,9 +387,11 @@
     }
     if (!p.liveLine) {
       p.liveLine = document.createElement("div");
-      p.liveLine.className = "partial";
       p.transcript.appendChild(p.liveLine);
     }
+    // Reassigned every update, not just at creation: the worker hops while
+    // one live line is on screen, so its band can change under it.
+    p.liveLine.className = ("partial " + bandClass(entry.band)).trim();
     p.liveLine.innerHTML = lineHTML(entry, "…");
     if (atBottom) p.scroll.scrollTop = p.scroll.scrollHeight;
   }
@@ -567,7 +602,8 @@
           spotted = '<span class="badge spotted">spotted</span>';
         }
         return (
-          `<tr><td class="call">${star}${esc(d.normalised)}</td>` +
+          `<tr class="${bandClass(d.band)}">` +
+          `<td class="call">${star}${esc(d.normalised)}</td>` +
           `<td>${esc(d.band)}</td><td>${fmtFreq(d.frequency)}</td>` +
           `<td>${esc((d.mode || "").toUpperCase())}</td>` +
           nameCell(d.name) +
@@ -617,7 +653,8 @@
     els.spotsBody.innerHTML = rows
       .map(
         (s) =>
-          `<tr><td>${fmtTime(s.time)}</td>` +
+          `<tr class="${bandClass(s.band)}">` +
+          `<td>${fmtTime(s.time)}</td>` +
           `<td class="call">${esc(s.callsign)}</td>` +
           `<td>${fmtFreq(s.freq)}</td><td>${esc(s.comment)}</td></tr>`
       )
@@ -638,7 +675,8 @@
           ? `<span class="star">★</span> ${esc(t.dx_callsign)}`
           : "";
         return (
-          `<tr><td>${esc(t.band)}</td><td>${fmtFreq(t.dial_freq)}</td>` +
+          `<tr class="${bandClass(t.band)}">` +
+          `<td>${esc(t.band)}</td><td>${fmtFreq(t.dial_freq)}</td>` +
           `<td>${esc((t.mode || "").toUpperCase())}</td>` +
           `<td>${(t.snr ?? 0).toFixed(1)}</td><td>${(t.confidence ?? 0).toFixed(2)}</td>` +
           `<td>${dx}</td><td>${t.visits ?? 0}</td><td>${t.callsigns_found ?? 0}</td></tr>`

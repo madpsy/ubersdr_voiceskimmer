@@ -344,6 +344,48 @@
     white-space: nowrap;
   }
   tbody tr:hover { background: #1c2128; }
+
+  /* -- Band colours ------------------------------------------------------
+     Eight evenly spaced hues, assigned by band in wavelength order and
+     cycling past the eighth (see bandClass in app.js). Every surface that
+     shows a band uses the same class, so one glance tells you a transcript
+     line, a confirmed callsign, a spot and an activity row all belong to
+     the same band without reading any of them.
+
+     The tints are given literally rather than derived with color-mix so
+     the palette renders identically everywhere, and kept faint: they sit
+     under text that still has to be comfortably readable. */
+  .band-c0 { --band: #58a6ff; --band-bg: rgba( 88, 166, 255, .10); } /* blue */
+  .band-c1 { --band: #a371f7; --band-bg: rgba(163, 113, 247, .10); } /* violet */
+  .band-c2 { --band: #f778ba; --band-bg: rgba(247, 120, 186, .10); } /* pink */
+  .band-c3 { --band: #f85149; --band-bg: rgba(248,  81,  73, .10); } /* red */
+  .band-c4 { --band: #ff9d4d; --band-bg: rgba(255, 157,  77, .10); } /* orange */
+  .band-c5 { --band: #e3b341; --band-bg: rgba(227, 179,  65, .10); } /* gold */
+  .band-c6 { --band: #3fb950; --band-bg: rgba( 63, 185,  80, .10); } /* green */
+  .band-c7 { --band: #39c5cf; --band-bg: rgba( 57, 197, 207, .10); } /* cyan */
+
+  tbody tr[class*="band-c"] { background: var(--band-bg); }
+  tbody tr[class*="band-c"] td:first-child {
+    box-shadow: inset 3px 0 0 var(--band);
+  }
+  /* After the tint so hover still reads as hover on a coloured row. */
+  tbody tr[class*="band-c"]:hover { background: #1c2128; }
+
+  /* The band cell itself carries the colour outright — the tint alone is
+     too faint to name a band by, and this makes the mapping obvious. */
+  #confirmed-table tbody tr[class*="band-c"] td:first-child + td,
+  #targets-table tbody tr[class*="band-c"] td:first-child {
+    color: var(--band);
+    font-weight: 600;
+  }
+
+  .transcript div[class*="band-c"] {
+    border-left: 3px solid var(--band);
+    padding-left: 6px;
+    background: var(--band-bg);
+  }
+  .transcript div[class*="band-c"] .meta { color: var(--band); opacity: .85; }
+  .transcript .final[class*="band-c"]:hover { background: #1c2128; }
   .call { font-weight: 600; }
   .star { color: var(--star); }
   .name { color: var(--dim); }

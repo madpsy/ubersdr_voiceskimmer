@@ -469,10 +469,17 @@ class WebUI:
             self._confirmed[key] = entry
         self._broadcast("confirmed", entry)
 
-    def push_spot(self, callsign: str, freq: int, comment: str, freq_bucket: int) -> None:
+    def push_spot(
+        self, callsign: str, freq: int, comment: str, freq_bucket: int,
+        band: str = "",
+    ) -> None:
+        # Band travels with the spot rather than being re-derived from the
+        # frequency in the browser: the server already named it, and a second
+        # band plan in the frontend could disagree with the one every other
+        # table is coloured and labelled by.
         key = f"{callsign}|{freq_bucket}"
         entry = {
-            "time": time.time(), "callsign": callsign,
+            "time": time.time(), "callsign": callsign, "band": band,
             "freq": freq, "comment": comment, "key": key,
         }
         with self._lock:

@@ -952,6 +952,7 @@ class CallsignScanner:
                 self.web.push_spot(
                     detection.normalised, detection.frequency, comment,
                     self.spot_throttle.bucket_freq(detection.frequency),
+                    detection.band,
                 )
 
     def _build_detection(
