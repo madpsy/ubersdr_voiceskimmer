@@ -181,7 +181,7 @@ exact frequency, so on a quiet instance expect zeroes.
 | `--silence-timeout` | 10 s | Move on early if nothing is heard at all — dead air, not a real dwell |
 | `--dwell-extension` | 30 s | Extra time when something callsign-shaped is heard but not yet validated |
 | `--revisit-cooldown` | 120 s | How long before a frequency may be revisited at all |
-| `--revisit-dwell-period` | 900 s | A frequency this scanner has already submitted a DX spot from within this long counts as a *revisit* |
+| `--revisit-dwell-period` | 900 s | A frequency this scanner has already submitted a DX spot from within this long counts as a *revisit*. No effect without `--spot` |
 | `--revisit-dwell-percent` | 0.50 | Fraction of the normal dwell times to spend on such a revisit. `1.0` treats it like anything else |
 | `--min-snr` | 8.0 | Raise to skip marginal signals |
 | `--min-extract-confidence` | 0.4 | Raise for precision, lower for recall |
@@ -531,6 +531,12 @@ on the new frequency is dropped as a duplicate of the previous one. It is a
 control message, not a teardown.
 
 ### Revisits
+
+**These do nothing unless `--spot` is enabled** and the DX cluster login
+succeeded. The trigger is a spot this scanner actually submitted — the history
+is only written after a successful submission — so with spotting off, or if the
+cluster rejected the login and the scanner degraded to not spotting, no
+frequency ever counts as a revisit and every dwell runs at full length.
 
 A frequency this scanner has already submitted a DX spot from is worth another
 look — a net or a pile-up keeps producing callsigns — but the likeliest outcome

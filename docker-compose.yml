@@ -43,7 +43,12 @@ services:
       # DWELL_EXTENSION: "30"
       # REVISIT_COOLDOWN: "120"
       #
-      # Revisits. A frequency this scanner has ALREADY submitted a DX spot
+      # Revisits. These do NOTHING unless SPOT is enabled below and the DX
+      # cluster login succeeded: the trigger is a spot this scanner actually
+      # submitted, so with spotting off no frequency ever counts as a revisit
+      # and every dwell runs at full length.
+      #
+      # A frequency this scanner has ALREADY submitted a DX spot
       # from is still worth another look — a net or a pile-up keeps producing
       # callsigns — but the likeliest outcome is hearing the station already
       # spotted, so it gets a shorter dwell.
