@@ -344,6 +344,7 @@ class CallsignScanner:
             # Lets the dashboard's listen button relay this session's audio.
             # The session stays muted until someone actually listens.
             self.web.audio[self.worker_id].attach(self.session, self.base_url)
+            self.web.set_audio_available(self.worker_id, True)
 
         attach_kwargs = {}
         if not self.args.stock_whisper:
@@ -509,6 +510,7 @@ class CallsignScanner:
                 self.validator.set_session_uuid(new_session.user_session_id)
                 if self.web:
                     self.web.audio[self.worker_id].attach(new_session, self.base_url)
+                    self.web.set_audio_available(self.worker_id, True)
                     self.web.set_worker_status(self.worker_id, True, "transcribing")
                 self._session_dead.clear()
                 self._whisper_dead.clear()   # re-attached fresh above

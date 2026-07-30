@@ -1104,6 +1104,20 @@ class WebUI:
             self._status[worker] = entry
         self._broadcast("status", entry)
 
+    def set_audio_available(self, worker: int, available: bool) -> None:
+        """
+        The scanner's audio relay (dis)attached for this worker — i.e. the
+        dashboard's Listen button can now relay live audio.
+
+        self.audio[w].available already reflects this at any instant, but
+        the frontend only reads it from the one-shot "state" snapshot sent
+        when /api/events first connects (see api_events()). A worker whose
+        session was still starting at that moment would otherwise show a
+        disabled Listen button forever, regardless of what happens after —
+        this broadcasts the change so an already-open dashboard catches up.
+        """
+        self._broadcast("audio_available", {"worker": worker, "available": available})
+
     def update_signal(
         self, worker: int, snr: float, peak: Optional[float], threshold: float
     ) -> None:

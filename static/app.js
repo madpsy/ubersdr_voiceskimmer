@@ -1633,6 +1633,11 @@
     es.addEventListener("targets", (e) => renderTargets(JSON.parse(e.data)));
     es.addEventListener("signal", (e) => renderSignal(JSON.parse(e.data)));
     es.addEventListener("status", (e) => renderStatus(JSON.parse(e.data)));
+    es.addEventListener("audio_available", (e) => {
+      const msg = JSON.parse(e.data);
+      const p = panelFor(msg);
+      if (p) renderAudioAvailable(p, msg.available);
+    });
     es.onerror = () => {
       // The browser's EventSource auto-reconnects; nothing to do here beyond
       // letting the connection indicator (uptime keeps ticking) imply it.
