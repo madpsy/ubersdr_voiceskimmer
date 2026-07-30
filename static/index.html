@@ -653,6 +653,27 @@
   }
   .tp-dot.up { background: var(--good); box-shadow: 0 0 5px var(--good); }
   .tp-dot.down { background: var(--bad); box-shadow: 0 0 5px var(--bad); }
+  .tp-activity {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--dim);
+    margin-right: 6px;
+    vertical-align: middle;
+    flex: 0 0 auto;
+    opacity: 0.35;
+    transition: background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+  }
+  .tp-activity.flash {
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+    opacity: 1;
+    animation: tp-activity-flash 900ms ease-out;
+  }
+  @keyframes tp-activity-flash {
+    0% { background: var(--accent); box-shadow: 0 0 8px var(--accent); opacity: 1; }
+    100% { background: var(--accent); box-shadow: 0 0 6px var(--accent); opacity: 1; }
+  }
   .tp-head .tp-current {
     color: var(--text);
     text-transform: none;

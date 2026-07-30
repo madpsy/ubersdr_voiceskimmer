@@ -304,6 +304,7 @@
         `<h2 class="tp-head">` +
         `<button class="panel-toggle" aria-expanded="true" title="Collapse"></button>` +
         `<span class="tp-dot" title="Whisper connection"></span>` +
+        `<span class="tp-activity" title="Incoming transcript activity"></span>` +
         `<span class="tp-label">${many ? `Transcript ${w.id + 1}` : "Live transcript"}</span>` +
         `<span class="tp-current"><span class="empty">waiting for a target…</span></span>` +
         `<span class="tp-signal" title="Live SNR from the audio stream. A peak above the threshold keeps this worker on the frequency."></span>` +
@@ -320,6 +321,8 @@
         listen: sec.querySelector(".tp-listen"),
         audio: sec.querySelector("audio"),
         dot: sec.querySelector(".tp-dot"),
+        activity: sec.querySelector(".tp-activity"),
+        activityTimer: null,
         transcript: sec.querySelector(".transcript"),
         scroll: sec.querySelector(".scroll"),
         liveLine: null,
@@ -350,6 +353,19 @@
     p.dot.classList.toggle("up", up);
     p.dot.classList.toggle("down", down);
     p.dot.title = st.detail || (up ? "transcribing" : down ? "not connected" : "connecting");
+  }
+
+  // Briefly lights up next to the connection dot so a collapsed panel still
+  // shows whether transcript segments are actually arriving, not just that
+  // Whisper is connected.
+  function flashActivity(p) {
+    if (!p || !p.activity) return;
+    p.activity.classList.remove("flash");
+    // Force reflow so re-adding the class restarts the CSS animation.
+    void p.activity.offsetWidth;
+    p.activity.classList.add("flash");
+    clearTimeout(p.activityTimer);
+    p.activityTimer = setTimeout(() => p.activity.classList.remove("flash"), 900);
   }
 
   function renderCurrent(current) {
@@ -1615,8 +1631,10 @@
     es.addEventListener("transcript", (e) => {
       // A segment completing supersedes the in-progress line it grew from.
       const entry = JSON.parse(e.data);
-      appendTranscript(entry);
-      setLiveTranscript(null, panelFor(entry));
+      const p = panelFor(entry);
+      appendTranscript(entry, p);
+      setLiveTranscript(null, p);
+      flashActivity(p);
     });
     es.addEventListener("live", (e) => setLiveTranscript(JSON.parse(e.data)));
     es.addEventListener("confirmed", (e) => {
