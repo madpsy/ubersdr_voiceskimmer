@@ -468,6 +468,7 @@
       ["Dwells", stats.dwells],
       ["Segments", stats.segments],
       ["Candidates", stats.candidates],
+      ["QRZ", stats.qrz_lookups],
       ["Validated", stats.validated],
       ["Rejected", stats.rejected],
       ["Unique confirmed", stats.unique_confirmed],

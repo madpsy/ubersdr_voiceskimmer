@@ -144,7 +144,7 @@ class SharedState:
         self.stats = {
             "dwells": 0, "segments": 0, "candidates": 0, "malformed": 0,
             "validated": 0, "rejected": 0, "dx_agreements": 0, "straddled": 0,
-            "too_short": 0,
+            "too_short": 0, "qrz_lookups": 0,
         }
 
         self.log_lock = threading.Lock()
@@ -1182,6 +1182,7 @@ class CallsignScanner:
             # QRZ is the arbiter. The extractor will invent callsign-shaped
             # strings out of ordinary speech; only a real registry lookup can
             # tell those apart from genuine stations.
+            self.shared.bump("qrz_lookups")
             result = self.validator.validate(normalised)
             detection = self._build_detection(
                 segment, target, cand, normalised, result, attribution
@@ -1396,6 +1397,7 @@ class CallsignScanner:
         print(f"  Candidates extracted: {self.stats['candidates']}")
         print(f"  Dropped (malformed):  {self.stats['malformed']}")
         print(f"  Dropped (too short):  {self.stats['too_short']}")
+        print(f"  QRZ lookups:          {self.stats['qrz_lookups']}")
         print(f"  Validated by QRZ:     {self.stats['validated']}")
         print(f"  Rejected by QRZ:      {self.stats['rejected']}")
         print(f"  Matched a DX spot:    {self.stats['dx_agreements']}")
