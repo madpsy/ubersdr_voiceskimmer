@@ -324,6 +324,7 @@
         scroll: sec.querySelector(".scroll"),
         liveLine: null,
         lastFinalText: null,
+        lastFreq: null,
         listening: false,
       };
       p.listen.addEventListener("click", () => setListening(p, !p.listening));
@@ -497,6 +498,21 @@
     p.lastFinalText = entry.text;
 
     const atBottom = scrolledToBottom(p);
+
+    // A visible break wherever the worker hopped frequency, so a wall of
+    // text doesn't read as continuous speech across an unrelated retune.
+    // Skipped on the very first line (lastFreq still null) — nothing to
+    // separate it from yet.
+    if (
+      typeof entry.freq === "number" &&
+      p.lastFreq !== null &&
+      entry.freq !== p.lastFreq
+    ) {
+      const divider = document.createElement("div");
+      divider.className = "freq-divider";
+      p.transcript.insertBefore(divider, p.liveLine);
+    }
+    p.lastFreq = entry.freq;
 
     const line = document.createElement("div");
     line.className = ("final " + bandClass(entry.band)).trim();
@@ -1552,6 +1568,7 @@
       p.transcript.innerHTML = "";
       p.liveLine = null;
       p.lastFinalText = null;
+      p.lastFreq = null;
       renderCurrent(w.current ? { ...w.current, worker: w.id } : null);
       (w.transcript || []).forEach((e) => appendTranscript(e, p));
       setLiveTranscript(w.live || null, p);
