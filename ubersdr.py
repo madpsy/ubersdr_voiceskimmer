@@ -324,7 +324,10 @@ class UberSDRSession:
             log.error("Audio session rejected: %s", detail)
             self._audio_failed.set()
             if self.on_error:
-                self.on_error(detail)
+                # Prefixed so the caller can reliably route this to the
+                # fatal path — detail is server-supplied free text and may
+                # not otherwise contain anything recognizable.
+                self.on_error("audio session rejected: %s" % detail)
         elif mtype in ("kicked", "session_kicked"):
             log.error("Session kicked by server: %s", msg)
             self._running = False
@@ -435,7 +438,10 @@ class UberSDRSession:
             log.error("Extension error: %s", err)
             self._attached.clear()
             if self.on_error:
-                self.on_error(err)
+                # Prefixed so the caller can route this to a re-attach retry
+                # rather than tearing down the whole session — the audio/DX
+                # sockets are fine, only the extension itself is unhappy.
+                self.on_error("whisper extension error: %s" % err)
         elif mtype == "audio_extension_control_ack":
             log.debug("Control ack: %s", msg.get("control_type"))
 
@@ -485,8 +491,13 @@ class UberSDRSession:
         elif msg_type == MSG_ERROR:
             err = payload.decode("utf-8", errors="replace")
             log.error("Whisper error: %s", err)
+            # The extension's own connection to the WhisperLive backend can
+            # fail (e.g. that service restarting) with the UberSDR session
+            # itself perfectly healthy — no segments will arrive until it is
+            # re-attached, so don't leave _attached looking still-good.
+            self._attached.clear()
             if self.on_error:
-                self.on_error(err)
+                self.on_error("whisper extension error: %s" % err)
 
     def _send_dx(self, payload: dict) -> bool:
         with self._lock:

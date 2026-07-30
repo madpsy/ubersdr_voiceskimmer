@@ -231,6 +231,13 @@ class CallsignScanner:
         # session with backoff via _reconnect(); _dwell's wait loop also
         # checks it so a mid-dwell drop doesn't sit out the rest of the dwell.
         self._session_dead = threading.Event()
+        # Set when the Whisper extension itself errors — its own connection
+        # to the WhisperLive backend can fail even while the UberSDR session
+        # is perfectly healthy (e.g. WhisperLive restarting independently of
+        # the instance), silently ending transcription. run() notices this
+        # and re-attaches with backoff via _reattach_whisper(), without
+        # tearing down the session — see _reconnect() for that heavier path.
+        self._whisper_dead = threading.Event()
         # Set by _segment_worker the instant a VALIDATED callsign is heard on
         # the frequency we are currently dwelling on; _dwell's wait loop polls
         # this and exits immediately rather than lingering.
@@ -435,6 +442,13 @@ class CallsignScanner:
             # giving up. See _reconnect().
             log.warning("Session lost: %s", message)
             self._session_dead.set()
+        elif "whisper extension error" in lowered:
+            # The extension's own link to WhisperLive, not the UberSDR
+            # session — that can fail on its own even while the session
+            # stays healthy. Re-attach rather than rebuilding the session.
+            # See _reattach_whisper().
+            log.warning("Whisper extension error: %s", message)
+            self._whisper_dead.set()
         elif "kicked" in lowered or "audio session" in lowered:
             log.error("Session lost: %s", message)
             self._running = False
@@ -487,6 +501,7 @@ class CallsignScanner:
                     self.web.audio[self.worker_id].attach(new_session, self.base_url)
                     self.web.set_worker_status(self.worker_id, True, "transcribing")
                 self._session_dead.clear()
+                self._whisper_dead.clear()   # re-attached fresh above
                 if old_session is not None:
                     old_session.stop()
                 log.info(
@@ -505,6 +520,56 @@ class CallsignScanner:
             backoff = min(backoff * 2, 30.0)
         return False
 
+    def _reattach_whisper(self) -> bool:
+        """
+        Re-attach the Whisper extension after it reports an error, without
+        touching the UberSDR session itself.
+
+        The extension's link to the WhisperLive backend is a separate
+        failure domain from the session's own websockets — it can die (and
+        recover) while the audio/DX sockets stay perfectly healthy, so a
+        full _reconnect() would be both unnecessary and slower to recover.
+        Same backoff shape as _reconnect(): 2s doubling to a 30s cap,
+        retried forever while the worker is running.
+        """
+        backoff = 2.0
+        while self._running:
+            if self._session_dead.is_set():
+                # The session itself went down mid-reattach — that's
+                # _reconnect()'s job, and it re-attaches Whisper as part of
+                # rebuilding the session anyway.
+                return False
+
+            log.warning("Re-attaching Whisper extension...")
+            if self.web:
+                self.web.set_worker_status(self.worker_id, False, "reattaching whisper")
+
+            self.session.detach_whisper()
+            time.sleep(0.2)   # let the server process the detach first
+
+            attach_kwargs = {}
+            if not self.args.stock_whisper:
+                attach_kwargs = {
+                    "initial_prompt": self.args.prompt,
+                    "task": "transcribe",
+                    "asr_language": self.args.asr_language,
+                }
+
+            if self.session.attach_whisper(**attach_kwargs):
+                self._whisper_dead.clear()
+                if self.web:
+                    self.web.set_worker_status(self.worker_id, True, "transcribing")
+                log.info("Whisper extension reattached")
+                return True
+
+            if not self._running:
+                return False
+            log.info("Whisper re-attach failed — retrying in %.0fs", backoff)
+            if not self._sleep(backoff):
+                return False
+            backoff = min(backoff * 2, 30.0)
+        return False
+
     # -- Main loop ----------------------------------------------------------
 
     def run(self) -> None:
@@ -515,6 +580,14 @@ class CallsignScanner:
             if self._session_dead.is_set():
                 if not self._reconnect():
                     break
+                continue
+
+            if self._whisper_dead.is_set():
+                # Success clears the flag; failure means either we were told
+                # to stop (outer while catches it) or the session died
+                # concurrently (next iteration's _session_dead check above
+                # handles that instead).
+                self._reattach_whisper()
                 continue
 
             if self.locked_target is not None:
@@ -676,7 +749,7 @@ class CallsignScanner:
 
         exit_reason = "timeout"
         while self._running:
-            if self._session_dead.is_set():
+            if self._session_dead.is_set() or self._whisper_dead.is_set():
                 exit_reason = "disconnected"
                 break
 
