@@ -147,6 +147,14 @@ services:
       # candidates. Check with: scanner.py --check
       # LOOKUP_INTERVAL: "6"
       #
+      # Seconds a definitive QRZ answer (200 or 404) is cached before it is
+      # eligible to be looked up again (default 86400 = 24h). Rate-limit
+      # refusals, transport errors and 5xx responses are never cached, since
+      # those aren't evidence about the callsign. Every QRZ lookup — cache
+      # hit, prefiltered, or a real outbound fetch — is logged to stdout,
+      # so `docker logs` shows exactly what's driving lookup volume.
+      # LOOKUP_CACHE_TTL: "86400"
+      #
       # PROGRESS_INTERVAL: "60"
       #
       # Stick to one exact frequency instead of hopping. With PARALLEL > 1,

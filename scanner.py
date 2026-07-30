@@ -51,6 +51,37 @@ log = logging.getLogger("scanner")
 # UI is showing as stalled is also the one the backend is trying to fix.
 WHISPER_STALL_TIMEOUT = 15.0
 
+# _process_partial re-runs extraction on every growing Whisper interim
+# hypothesis, so the same utterance can validate the same callsign several
+# times a second (a cache hit each time, not a fresh QRZ request — see
+# CallsignValidator). Without gating on this, each of those re-validations
+# produced its own CONFIRMED console line AND its own SpotThrottle hit — the
+# hit count was silently counting re-decodes of one utterance, not distinct
+# hearings, which both inflated the dashboard's "Hits" column and let a
+# single utterance alone satisfy --spot-min-hits. Treating everything within
+# this window as "still the same hearing" — announce, hit-count, and spot
+# eligibility together — collapses a burst from one utterance into one
+# credit, while a station heard again well after this window still gets its
+# own.
+REHEARING_DEBOUNCE = 10.0
+
+# Guards against a specific failure mode: confirming a callsign ends its
+# dwell immediately and retunes (see _dwell's "confirmed" exit), which resets
+# WhisperLive's server-side dedup history so it will accept "new" text again.
+# Audio still draining from the utterance that just confirmed can then
+# re-decode moments later against whichever frequency we hopped to next, and
+# the same real callsign gets wrongly credited there too — observed live,
+# repeatedly, as the same station "confirmed" (and even DX-spotted) across
+# several unrelated frequencies, sometimes different bands, seconds apart. If
+# the same callsign was just credited on a DIFFERENT frequency within this
+# many seconds, later hits are treated as that trailing audio rather than a
+# fresh hearing — see the bleed-through guard in _process(). Generous relative
+# to REHEARING_DEBOUNCE because a cascade can chain through several hops
+# before it dies out, each a few seconds apart; the guard's window slides
+# forward on every suppressed repeat so a long cascade stays caught rather
+# than only its first link.
+BLEED_THROUGH_GUARD = 20.0
+
 # Primes Whisper for on-air phonetics. Without this it renders "mike mike three"
 # as prose and drifts toward conversational English; with it, spelled-out
 # callsigns survive far more often. Kept under the 1024-byte server cap.
@@ -103,6 +134,15 @@ class Detection:
     # above is a best guess rather than a certainty.
     attribution_certain: bool = True
     straddled_hop: bool = False
+    # True when this candidate is the same callsign that was just credited on
+    # a DIFFERENT frequency moments ago, on this same worker — see the
+    # cross-frequency bleed-through guard in _process(). Confirming a
+    # validated callsign ends its dwell immediately and retunes, which resets
+    # WhisperLive's server-side dedup history; audio still draining from the
+    # utterance that just confirmed can then re-decode as "new" text against
+    # the frequency we just hopped to. Kept in the log (not silently dropped)
+    # so the false-positive rate is visible, but never announced or spotted.
+    suspected_bleed_through: bool = False
 
 
 class SharedState:
@@ -144,7 +184,8 @@ class SharedState:
         self.stats = {
             "dwells": 0, "segments": 0, "candidates": 0, "malformed": 0,
             "validated": 0, "rejected": 0, "dx_agreements": 0, "straddled": 0,
-            "too_short": 0, "qrz_lookups": 0,
+            "too_short": 0, "qrz_lookups": 0, "debounced": 0,
+            "bleed_through": 0,
         }
 
         self.log_lock = threading.Lock()
@@ -206,6 +247,17 @@ class CallsignScanner:
         # one utterance logged under two frequencies a second apart and
         # credited two corroboration hits, which defeats --spot-min-hits.
         self._recent_completed: "OrderedDict[str, float]" = OrderedDict()
+
+        # (callsign, freq_bucket) -> last time THIS worker looked this pair
+        # up — see REHEARING_DEBOUNCE, checked before the QRZ lookup even
+        # happens. Per worker, not shared: two workers never sit on the same
+        # frequency at once (see the class docstring), so this is purely
+        # about one worker re-processing its own growing Whisper partials or
+        # a duplicate segment as if each were a new hearing.
+        self._last_seen: Dict[Tuple[str, int], float] = {}
+        # callsign -> (freq_bucket, when) THIS worker last credited it —
+        # see BLEED_THROUGH_GUARD. Per worker for the same reason.
+        self._last_credited: Dict[str, Tuple[int, float]] = {}
 
         self.spot_throttle = self.shared.spot_throttle
         self.timeline = FrequencyTimeline(pipeline_latency=args.pipeline_latency)
@@ -353,6 +405,7 @@ class CallsignScanner:
             session_uuid=self.session.user_session_id,
             min_interval=self.args.lookup_interval,
             prefilter=not self.args.no_prefilter,
+            cache_ttl=self.args.lookup_cache_ttl,
         )
 
         if self.web:
@@ -1179,6 +1232,27 @@ class CallsignScanner:
                     )
                 continue
 
+            # Same worker, same callsign, same frequency, processed moments
+            # ago — see REHEARING_DEBOUNCE. Almost certainly the same
+            # utterance being re-decoded (a growing Whisper partial, or a
+            # duplicate segment slipping past _recent_completed), not a new
+            # hearing, so skip the lookup entirely: no QRZ call — not even a
+            # free cache hit is worth counting — no hit, no re-announce.
+            freq_bucket = self.spot_throttle.bucket_freq(target.dial_freq)
+            debounce_key = (normalised, freq_bucket)
+            now = time.time()
+            last_seen = self._last_seen.get(debounce_key, 0.0)
+            if now - last_seen < REHEARING_DEBOUNCE:
+                self.shared.bump("debounced")
+                if self.args.verbose:
+                    log.info(
+                        "   – %s seen %.1fs ago on this frequency — not "
+                        "looked up again yet",
+                        normalised, now - last_seen,
+                    )
+                continue
+            self._last_seen[debounce_key] = now
+
             # QRZ is the arbiter. The extractor will invent callsign-shaped
             # strings out of ordinary speech; only a real registry lookup can
             # tell those apart from genuine stations.
@@ -1192,15 +1266,40 @@ class CallsignScanner:
                 self.shared.bump("validated")
                 if detection.agrees_with_dx_spot:
                     self.shared.bump("dx_agreements")
-                freq_bucket = self.spot_throttle.bucket_freq(detection.frequency)
                 key = (normalised, freq_bucket)
-                is_repeat = key in self.confirmed
-                self.confirmed[key] = detection
-                self._announce(detection, is_repeat, freq_bucket)
-                # Independent of is_repeat: the on-screen tag never resets,
-                # but a station still active after the spot cooldown is worth
-                # spotting again — see SpotThrottle.
-                self._maybe_spot(detection)
+
+                # Cross-frequency bleed-through guard — see
+                # BLEED_THROUGH_GUARD. Confirming ends the dwell immediately
+                # and retunes, which can let audio still draining from THIS
+                # utterance re-decode against whatever frequency we just
+                # hopped to. If this worker credited this exact callsign on a
+                # DIFFERENT frequency moments ago, this is almost certainly
+                # that, not a fresh, independent hearing.
+                last_bucket, last_credited_at = self._last_credited.get(
+                    normalised, (freq_bucket, 0.0)
+                )
+                if (
+                    last_bucket != freq_bucket
+                    and now - last_credited_at < BLEED_THROUGH_GUARD
+                ):
+                    detection.suspected_bleed_through = True
+                    self._last_credited[normalised] = (freq_bucket, now)
+                    self.shared.bump("bleed_through")
+                    log.warning(
+                        "   ~ %s confirmed on %.3f MHz %.0fs after being "
+                        "confirmed on a different frequency — suspected "
+                        "cross-frequency bleed-through, not counted",
+                        normalised, detection.frequency / 1e6,
+                        now - last_credited_at,
+                    )
+                else:
+                    self._last_credited[normalised] = (freq_bucket, now)
+                    is_repeat = key in self.confirmed
+                    self.confirmed[key] = detection
+                    self._announce(detection, is_repeat, freq_bucket)
+                    # A station still active after the spot cooldown is
+                    # worth spotting again — see SpotThrottle.
+                    self._maybe_spot(detection)
             elif result.checked:
                 self.shared.bump("rejected")
                 if self.args.verbose:
@@ -1397,17 +1496,20 @@ class CallsignScanner:
         print(f"  Candidates extracted: {self.stats['candidates']}")
         print(f"  Dropped (malformed):  {self.stats['malformed']}")
         print(f"  Dropped (too short):  {self.stats['too_short']}")
+        print(f"  Debounced (rehearing):{self.stats['debounced']}")
         print(f"  QRZ lookups:          {self.stats['qrz_lookups']}")
         print(f"  Validated by QRZ:     {self.stats['validated']}")
         print(f"  Rejected by QRZ:      {self.stats['rejected']}")
         print(f"  Matched a DX spot:    {self.stats['dx_agreements']}")
         print(f"  Spanned a hop:        {self.stats['straddled']}")
+        print(f"  Suspected bleed-through: {self.stats['bleed_through']}")
 
         if self.validator is not None:
             stats = self.validator.stats
             print(
                 f"  Lookups: {stats['misses']} sent, {stats['hits']} cached, "
-                f"{stats['prefiltered']} prefiltered, {stats['errors']} failed"
+                f"{stats['prefiltered']} prefiltered, {stats['errors']} failed, "
+                f"{stats['expired']} expired"
             )
 
         if self.confirmed:
@@ -1586,6 +1688,11 @@ def parse_args(argv=None):
     extract.add_argument("--lookup-interval", type=float, default=0.0,
                          help="Min seconds between QRZ lookups (use 6.0 if not "
                               "running from a bypassed IP)")
+    extract.add_argument("--lookup-cache-ttl", type=float, default=86400.0,
+                         help="Seconds a definitive QRZ answer (200 or 404) is "
+                              "cached before being looked up again (default "
+                              "86400 = 24h). Rate-limit refusals, transport "
+                              "errors and 5xx are never cached.")
     extract.add_argument("--no-prefilter", action="store_true",
                          help="Skip the free CTY unallocated-prefix filter and "
                               "send every candidate straight to QRZ")
@@ -1762,6 +1869,7 @@ def build_settings(args) -> List[Dict[str, Any]]:
             {"label": "Max candidates per segment", "value": str(args.max_candidates)},
             {"label": "QRZ lookup interval",
              "value": _fmt_secs(args.lookup_interval) if args.lookup_interval else "No minimum"},
+            {"label": "QRZ cache TTL", "value": _fmt_secs(args.lookup_cache_ttl)},
             {"label": "CTY prefilter", "value": "Skipped" if args.no_prefilter else "Enabled"},
             {"label": "Segment join gap",
              "value": _fmt_secs(args.segment_join_gap) if args.segment_join_gap else "Disabled"},

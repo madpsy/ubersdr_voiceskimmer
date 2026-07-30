@@ -182,9 +182,24 @@ LOOSE_DIGITS: Dict[str, str] = {
     "nine": "9", "nina": "9",
 }
 
-# Phrases that immediately precede a callsign on the air. A run following one of
-# these within a couple of tokens gets a large confidence boost, which is what
-# lets us accept otherwise-ambiguous runs like "for radio sugar".
+# Phrases that immediately precede a callsign SELF-IDENTIFICATION on the air.
+# A run following one of these within a couple of tokens gets a large
+# confidence boost, which is what lets us accept otherwise-ambiguous runs like
+# "for radio sugar".
+#
+# "calling", "back to" and "over to" used to be in this list, which was wrong:
+# those phrases address ANOTHER station, not the speaker's own callsign — "I'm
+# calling 9A5EAT" or "back to 9A5EAT" names who the speaker is trying to
+# reach, not who is transmitting. Boosting confidence there meant a pileup of
+# callers spread across several frequencies, all saying "calling <wanted
+# callsign>", would each get that DX station confidently extracted, QRZ-
+# validated (it's a real callsign) and spotted as if it were transmitting on
+# every one of their frequencies simultaneously — observed live as the same
+# actively-spotted callsign "confirmed" and re-spotted across frequencies (and
+# even bands) seconds apart. Removing them does not stop a clearly, fully
+# phonetic-spelled callsign after "calling" from still being extracted — it
+# just stops the artificial cue bonus from promoting a weak/ambiguous run into
+# a confident false attribution.
 CUE_PHRASES: List[List[str]] = [
     ["this", "is"],
     ["cq"],
@@ -194,10 +209,7 @@ CUE_PHRASES: List[List[str]] = [
     ["call", "sign"],
     ["my", "call"],
     ["station"],
-    ["calling"],
     ["qrz"],
-    ["back", "to"],
-    ["over", "to"],
     ["handle", "is"],
     ["name", "here", "is"],
 ]

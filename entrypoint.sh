@@ -40,6 +40,10 @@
 #                         it with.
 #   LOOKUP_INTERVAL       Seconds between QRZ lookups — set to 6 if this
 #                         instance is not on a bypassed IP          (default: 0)
+#   LOOKUP_CACHE_TTL      Seconds a definitive QRZ answer (200/404) stays
+#                         cached before it may be looked up again
+#                         (default: 86400 = 24h). Rate limits, transport
+#                         errors and 5xx are never cached.
 #   PROGRESS_INTERVAL     Seconds between progress lines           (default: 60)
 #   LOCK_FREQ             Stick to one frequency (Hz) instead of hopping
 #   LOCK_MODE             Mode for LOCK_FREQ                     (default: usb)
@@ -93,6 +97,7 @@ args=""
 [ -n "$MIN_EXTRACT_CONFIDENCE" ] && args="$args --min-extract-confidence $MIN_EXTRACT_CONFIDENCE"
 [ "$PARTIAL_EXTRACTION" = "0" ] && args="$args --no-partial-extraction"
 [ -n "$LOOKUP_INTERVAL"      ] && args="$args --lookup-interval $LOOKUP_INTERVAL"
+[ -n "$LOOKUP_CACHE_TTL"     ] && args="$args --lookup-cache-ttl $LOOKUP_CACHE_TTL"
 [ -n "$PROGRESS_INTERVAL"    ] && args="$args --progress-interval $PROGRESS_INTERVAL"
 
 [ -n "$ASR_LANGUAGE"         ] && args="$args --asr-language $ASR_LANGUAGE"

@@ -28,7 +28,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import requests
 
@@ -78,6 +78,7 @@ class CallsignValidator:
         timeout: float = 8.0,
         min_interval: float = 0.0,
         prefilter: bool = True,
+        cache_ttl: float = 86400.0,
     ):
         """
         Args:
@@ -89,14 +90,19 @@ class CallsignValidator:
                           10/min limit when running remotely.
             prefilter:    discard callsigns whose prefix matches no DXCC entity
                           before spending a QRZ request (negative filter only)
+            cache_ttl:    seconds a definitive answer (200 or 404) stays cached
+                          before it is eligible to be looked up again
         """
         self.base_url = base_url.rstrip("/")
         self.session_uuid = session_uuid
         self.timeout = timeout
         self.min_interval = min_interval
         self.prefilter = prefilter
+        self.cache_ttl = cache_ttl
 
-        self._cache: Dict[str, LookupResult] = {}
+        # Value is (result, cached_at) so entries can expire independently of
+        # process lifetime — see _cache_get/_cache_put.
+        self._cache: Dict[str, Tuple[LookupResult, float]] = {}
         self._prefix_cache: Dict[str, bool] = {}
         self._lock = threading.Lock()
         self._last_request = 0.0
@@ -104,7 +110,7 @@ class CallsignValidator:
         self._http.headers["User-Agent"] = USER_AGENT
 
         self.stats = {
-            "hits": 0, "misses": 0, "valid": 0,
+            "hits": 0, "misses": 0, "valid": 0, "expired": 0,
             "not_found": 0, "errors": 0, "prefiltered": 0,
         }
 
@@ -125,15 +131,15 @@ class CallsignValidator:
 
     def validate(self, callsign: str) -> LookupResult:
         """
-        Look up one callsign. Cached, so repeated hits on the same station
-        during a dwell cost nothing.
+        Look up one callsign. Cached for cache_ttl seconds, so repeated hits
+        on the same station cost nothing until the entry expires.
         """
         callsign = callsign.upper().strip()
 
-        with self._lock:
-            cached = self._cache.get(callsign)
+        cached = self._cache_get(callsign)
         if cached is not None:
             self.stats["hits"] += 1
+            log.info("QRZ lookup  %-10s  cache hit    -> %s", callsign, cached.summary)
             return cached
 
         # Free negative filter: a prefix belonging to no DXCC entity cannot be a
@@ -144,20 +150,42 @@ class CallsignValidator:
                 callsign, valid=False, checked=True,
                 error="prefix not allocated to any DXCC entity",
             )
-            with self._lock:
-                self._cache[callsign] = result
+            self._cache_put(callsign, result)
+            log.info("QRZ lookup  %-10s  prefiltered  -> prefix not allocated", callsign)
             return result
 
         self.stats["misses"] += 1
+        started = time.time()
         result = self._fetch(callsign)
+        elapsed_ms = (time.time() - started) * 1000
 
-        # Cache definitive answers only. A transport error or rate-limit refusal
-        # is not evidence about the callsign, so leave it retryable.
+        # Cache definitive answers only (HTTP 200/404). A transport error,
+        # rate-limit refusal, or 5xx is not evidence about the callsign, so
+        # leave it retryable rather than caching it.
         if result.checked:
-            with self._lock:
-                self._cache[callsign] = result
+            self._cache_put(callsign, result)
 
+        log.info(
+            "QRZ lookup  %-10s  fetched (%4.0fms) -> %s",
+            callsign, elapsed_ms, result.summary,
+        )
         return result
+
+    def _cache_get(self, callsign: str) -> Optional[LookupResult]:
+        with self._lock:
+            entry = self._cache.get(callsign)
+            if entry is None:
+                return None
+            result, cached_at = entry
+            if time.time() - cached_at > self.cache_ttl:
+                del self._cache[callsign]
+                self.stats["expired"] += 1
+                return None
+            return result
+
+    def _cache_put(self, callsign: str, result: LookupResult) -> None:
+        with self._lock:
+            self._cache[callsign] = (result, time.time())
 
     def _prefix_plausible(self, callsign: str) -> bool:
         """
