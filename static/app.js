@@ -323,6 +323,7 @@
         dot: sec.querySelector(".tp-dot"),
         activity: sec.querySelector(".tp-activity"),
         activityTimer: null,
+        staleTimer: null,
         transcript: sec.querySelector(".transcript"),
         scroll: sec.querySelector(".scroll"),
         liveLine: null,
@@ -336,6 +337,7 @@
       });
       panels.set(w.id, p);
       restoreCollapsed(sec);
+      scheduleStale(p);
     }
   }
 
@@ -355,17 +357,27 @@
     p.dot.title = st.detail || (up ? "transcribing" : down ? "not connected" : "connecting");
   }
 
+  const ACTIVITY_STALE_MS = 15000;
+
   // Briefly lights up next to the connection dot so a collapsed panel still
   // shows whether transcript segments are actually arriving, not just that
-  // Whisper is connected.
+  // Whisper is connected. Turns red once ACTIVITY_STALE_MS passes without a
+  // new segment, so a stuck-but-still-"connected" worker doesn't look fine.
   function flashActivity(p) {
     if (!p || !p.activity) return;
-    p.activity.classList.remove("flash");
+    p.activity.classList.remove("flash", "stale");
     // Force reflow so re-adding the class restarts the CSS animation.
     void p.activity.offsetWidth;
     p.activity.classList.add("flash");
     clearTimeout(p.activityTimer);
     p.activityTimer = setTimeout(() => p.activity.classList.remove("flash"), 900);
+    scheduleStale(p);
+  }
+
+  function scheduleStale(p) {
+    if (!p || !p.activity) return;
+    clearTimeout(p.staleTimer);
+    p.staleTimer = setTimeout(() => p.activity.classList.add("stale"), ACTIVITY_STALE_MS);
   }
 
   function renderCurrent(current) {
