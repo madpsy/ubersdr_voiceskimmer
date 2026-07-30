@@ -183,7 +183,7 @@ exact frequency, so on a quiet instance expect zeroes.
 | `--revisit-cooldown` | 120 s | How long before a frequency may be revisited at all |
 | `--revisit-dwell-period` | 900 s | A frequency this scanner has already submitted a DX spot from within this long counts as a *revisit*. No effect without `--spot` |
 | `--revisit-dwell-percent` | 0.50 | Fraction of the normal dwell times to spend on such a revisit. `1.0` treats it like anything else |
-| `--min-snr` | 8.0 | Raise to skip marginal signals |
+| `--min-snr` | 8.0 | Raise to skip marginal signals. A **per-channel** SNR, filtering the server's activity feed — not the same scale as `--silence-min-snr` |
 | `--min-extract-confidence` | 0.4 | Raise for precision, lower for recall |
 | `--min-callsign-length` | 4 | Minimum callsign length to be looked up at all — shorter ones never reach QRZ, so are never confirmed or spotted. Applies to literal verbatim matches too |
 | `--pipeline-latency` | 2.0 s | Raise if your WhisperLive is slow (affects frequency attribution) |
@@ -529,6 +529,24 @@ On every hop the scanner sends a `reset_transcript` control message, clearing
 Whisper's duplicate-suppression history — without it a genuine new "this is …"
 on the new frequency is dropped as a duplicate of the previous one. It is a
 control message, not a teardown.
+
+### The two SNR thresholds
+
+`--min-snr` (8) and `--silence-min-snr` (40) both read "SNR in dB" but are
+**different measurements on different scales**, which is why the defaults look
+so far apart:
+
+| | Source | Scale |
+|---|---|---|
+| `--min-snr` | the server's voice activity feed | Per-channel SNR: the detected region's average power minus the median noise floor (`voice_activity.go`). The server's own detector only looks for regions 6–10 dB above noise, so 8 sits mid-range of what is reported at all. |
+| `--silence-min-snr` | the audio frame headers, measured here | `basebandPower − noiseDensity` — power vs noise **density**, the server's own `min_snr` definition. Runs about 34.8 dB higher for the same signal (10·log10 of a 3 kHz channel). |
+
+So 40 on the silence scale is roughly 5 dB of channel SNR — in the same
+ballpark as `--min-snr`'s 8. Only the scales differ.
+
+**Do not copy 40 into `--min-snr`.** It would demand a 40 dB per-channel SNR
+from the activity feed, nothing would clear it, and the scanner would sit with
+nothing to scan.
 
 ### Revisits
 

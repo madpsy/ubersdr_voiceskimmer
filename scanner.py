@@ -1240,7 +1240,8 @@ def parse_args(argv=None):
                            "producing anything. Any single peak above this "
                            "keeps the dwell alive. This is power vs noise "
                            "DENSITY (the server's own min_snr definition), not "
-                           "per-channel SNR — subtract ~34.8 dB for a 3 kHz "
+                           "per-channel SNR, and so NOT the same scale as "
+                           "--min-snr — subtract ~34.8 dB for a 3 kHz "
                            "SSB channel. Measured live: a quiet frequency "
                            "sits around 33-34 dB and peaks below 38; an "
                            "active one peaks past 40. Used in preference to "
@@ -1257,6 +1258,8 @@ def parse_args(argv=None):
     scan.add_argument("--revisit-cooldown", type=float, default=120.0,
                       help="Seconds before a frequency may be revisited. "
                            "Ignored when every target is in cooldown.")
+    # NB: a per-channel SNR, unlike --silence-min-snr, which is power vs noise
+    # density and runs ~34.8 dB higher for the same signal. See that flag.
     scan.add_argument("--min-snr", type=float, default=8.0,
                       help="Ignore activity below this SNR")
     scan.add_argument("--min-confidence", type=float, default=0.7,

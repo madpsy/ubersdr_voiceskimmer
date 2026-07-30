@@ -72,7 +72,18 @@ services:
       # REVISIT_DWELL_PERIOD: "900"
       # REVISIT_DWELL_PERCENT: "0.50"
       #
-      # Ignore weak/uncertain voice activity
+      # Ignore weak/uncertain voice activity.
+      #
+      # MIN_SNR is a PER-CHANNEL SNR in dB, filtering the server's voice
+      # activity feed. The server computes it as the detected region's average
+      # power minus the median noise floor (voice_activity.go), and its own
+      # detector only looks for regions 6-10 dB above noise — so 8 sits in the
+      # middle of the range anything is reported in at all.
+      #
+      # NOTE this is NOT the same scale as SILENCE_MIN_SNR below, despite both
+      # being "SNR in dB". That one is power vs noise DENSITY and runs about
+      # 34.8 dB higher for the same signal. Do not copy 40 up here: it would
+      # demand a 40 dB channel SNR and the scanner would find nothing to scan.
       # MIN_SNR: "8"
       # MIN_CONFIDENCE: "0.7"
       #
@@ -82,8 +93,13 @@ services:
       # SILENCE_TIMEOUT keeps the dwell alive; otherwise the scanner moves on.
       #
       # This is power vs noise DENSITY, not per-channel SNR — subtract about
-      # 34.8 dB for a 3 kHz SSB channel. Measured live: a quiet frequency
-      # sits around 33-34 dB and peaks below 38, an active one peaks past 40.
+      # 34.8 dB (10*log10 of a 3 kHz SSB channel) to compare it with MIN_SNR
+      # above, which IS per-channel. So this 40 is roughly 5 dB of channel
+      # SNR, in the same ballpark as MIN_SNR's 8 — the numbers look wildly
+      # different only because the two scales are.
+      #
+      # Measured live: a quiet frequency sits around 33-34 dB on this scale
+      # and peaks below 38, an active one peaks past 40.
       # SILENCE_MIN_SNR: "40"
       # SILENCE_TIMEOUT: "10"
       #
