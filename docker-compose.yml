@@ -8,6 +8,7 @@ services:
       # UberSDR connection
       UBERSDR_HOST: "ubersdr"
       UBERSDR_PORT: "8080"
+      # Set to 1 for https/wss to the instance
       # UBERSDR_SSL: "1"
       # UBERSDR_PASS: ""
       #
@@ -21,10 +22,20 @@ services:
       # Restrict to one or more bands, comma-separated (default: all bands)
       # BAND: "20m,40m"
       #
-      # Dwell tuning (seconds). A frequency is held for DWELL; anything
-      # callsign-shaped that has not validated yet pushes that out by
-      # DWELL_EXTENSION, and MAX_DWELL is the hard ceiling however much is
-      # being heard. A validated callsign ends the dwell immediately.
+      # Dwell tuning. All values below are SECONDS.
+      #
+      #   DWELL            how long a frequency is held to begin with
+      #   DWELL_EXTENSION  added when something callsign-shaped is heard but
+      #                    has not validated yet, in the hope a repeat lets it
+      #   MAX_DWELL        hard ceiling however much is being heard, so a busy
+      #                    net cannot hold the scanner indefinitely
+      #   REVISIT_COOLDOWN how long a frequency is left alone after the
+      #                    scanner moves off it, before it may be picked again
+      #
+      # A validated callsign ends the dwell immediately — confirming one is
+      # the point of the visit. Dead air ends it after SILENCE_TIMEOUT below.
+      # So MAX_DWELL is a worst case, not a typical one.
+      #
       # Setting MAX_DWELL below DWELL truncates the base dwell, not just the
       # extensions — the scanner warns if you do.
       # DWELL: "30"
@@ -33,15 +44,26 @@ services:
       # REVISIT_COOLDOWN: "120"
       #
       # Revisits. A frequency this scanner has ALREADY submitted a DX spot
-      # from within REVISIT_DWELL_PERIOD is still worth another look — a net
-      # or a pile-up keeps producing callsigns — but the likeliest outcome is
-      # hearing the station already spotted, so it gets a shorter dwell.
-      # REVISIT_DWELL_PERCENT scales every timing above together (base dwell,
-      # ceiling, silence timeout and extension); scaling only one would let
-      # the others undo it. Set 1.00 to treat revisits like anything else.
+      # from is still worth another look — a net or a pile-up keeps producing
+      # callsigns — but the likeliest outcome is hearing the station already
+      # spotted, so it gets a shorter dwell.
       #
-      # Not the same as REVISIT_COOLDOWN, which decides whether a frequency
-      # may be visited AT ALL. This decides how long once it is.
+      #   REVISIT_DWELL_PERIOD   SECONDS. How recently a spot must have gone
+      #                          out from a frequency for the next visit to
+      #                          count as a revisit. 900 = 15 minutes.
+      #   REVISIT_DWELL_PERCENT  A FRACTION, not seconds. How much of the
+      #                          normal dwell a revisit gets. 0.50 = half, so
+      #                          on the defaults 15s base, 30s ceiling, 5s
+      #                          silence. 1.00 = no reduction. Must be above
+      #                          0 and at most 1.
+      #
+      # The percentage scales EVERY timing above together — base dwell,
+      # ceiling, silence timeout and extension. Scaling only one would let the
+      # others undo it: a frequency still producing unvalidated candidates
+      # would extend straight back up to the full ceiling.
+      #
+      # Not the same as REVISIT_COOLDOWN. That decides whether a frequency may
+      # be visited AT ALL; this decides how long, once it is.
       # REVISIT_DWELL_PERIOD: "900"
       # REVISIT_DWELL_PERCENT: "0.50"
       #
@@ -88,6 +110,14 @@ services:
       #
       # DX cluster spot submission — off by default. Spots are immediately
       # visible to every connected DX cluster client.
+      #
+      #   SPOT             set to 1 to enable; anything else leaves it off
+      #   SPOTTER_CALL     your callsign, required with SPOT
+      #   SPOTTER_PASS     your DX cluster spot password, required with SPOT
+      #   SPOT_TAG         prefix on the spot comment, so these are
+      #                    distinguishable from manual or CW-skimmer spots
+      #   SPOT_COOLDOWN    SECONDS before the same callsign may be spotted
+      #                    again on the same frequency. 900 = 15 minutes
       # SPOT: "1"
       # SPOTTER_CALL: ""
       # SPOTTER_PASS: ""
