@@ -34,6 +34,7 @@ from lookup import CallsignValidator, LookupResult
 from preflight import run_preflight
 from phonetics import (
     Candidate,
+    dx_boundary_correction,
     extract_callsigns,
     is_lookupable,
     normalise_callsign,
@@ -130,6 +131,10 @@ class Detection:
     longitude: Optional[float] = None
     dx_spot: str = ""
     agrees_with_dx_spot: bool = False
+    # True when `normalised` was recovered from a boundary-clipped decode by
+    # aligning it against dx_spot — see dx_boundary_correction(). The decoded
+    # candidate is still preserved unmodified above.
+    dx_corrected: bool = False
     # False when the segment's audio spanned a frequency hop, so the frequency
     # above is a best guess rather than a certainty.
     attribution_certain: bool = True
@@ -1192,6 +1197,22 @@ class CallsignScanner:
                 continue
 
             normalised = normalise_callsign(cand.callsign)
+
+            # Hop-straddle recovery — see dx_boundary_correction(). Applied
+            # before the seen/lookup/debounce gates below so the corrected
+            # callsign is what actually gets deduped, looked up, announced
+            # and spotted, not the clipped decode.
+            dx_corrected = False
+            if target.dx_callsign:
+                corrected = dx_boundary_correction(normalised, target.dx_callsign)
+                if corrected:
+                    log.info(
+                        "   ~ %s → %s aligned to DX spot (boundary clip recovered)",
+                        normalised, corrected,
+                    )
+                    normalised = corrected
+                    dx_corrected = True
+
             if seen is not None:
                 if normalised in seen:
                     continue          # already handled for this arrival
@@ -1259,7 +1280,7 @@ class CallsignScanner:
             self.shared.bump("qrz_lookups")
             result = self.validator.validate(normalised)
             detection = self._build_detection(
-                segment, target, cand, normalised, result, attribution
+                segment, target, cand, normalised, result, attribution, dx_corrected
             )
 
             if result.valid:
@@ -1323,7 +1344,12 @@ class CallsignScanner:
         """
         marker = "★" if detection.agrees_with_dx_spot else "✓"  # star / check
         who = detection.name or detection.country or "no QRZ bio"
-        dx_note = "  [matches DX spot]" if detection.agrees_with_dx_spot else ""
+        if detection.dx_corrected:
+            dx_note = "  [boundary-corrected to DX spot]"
+        elif detection.agrees_with_dx_spot:
+            dx_note = "  [matches DX spot]"
+        else:
+            dx_note = ""
         tag = " (repeat)" if is_repeat else f" [#{len(self.confirmed)} unique]"
 
         log.info(
@@ -1393,6 +1419,7 @@ class CallsignScanner:
     def _build_detection(
         self, segment: Segment, target: Target,
         cand: Candidate, normalised: str, result: LookupResult, attribution,
+        dx_corrected: bool = False,
     ) -> Detection:
         agrees = bool(
             target.dx_callsign
@@ -1424,6 +1451,7 @@ class CallsignScanner:
             longitude=result.longitude,
             dx_spot=target.dx_callsign,
             agrees_with_dx_spot=agrees,
+            dx_corrected=dx_corrected,
             attribution_certain=attribution.certain,
             straddled_hop=attribution.straddled,
         )

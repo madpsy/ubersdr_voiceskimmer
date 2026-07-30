@@ -17,6 +17,7 @@ from phonetics import (
     _tokenise_cased,
     _letter_o_as_zero,
     _split_joined_callsigns,
+    dx_boundary_correction,
     explain,
     extract_callsigns,
     extract_phonetic,
@@ -310,6 +311,44 @@ class TestNormalisation(unittest.TestCase):
 
     def test_plain_callsign_unchanged(self):
         self.assertEqual(normalise_callsign("mm3ndh"), "MM3NDH")
+
+
+class TestDxBoundaryCorrection(unittest.TestCase):
+    """
+    Recovers a callsign clipped at a hop boundary by aligning it against the
+    manually-entered DX spot for the same frequency — see the live miss:
+    candidate O26TRUD against dx_spot OO26TRUDO (one phonetic word lost off
+    each end of the recording).
+    """
+
+    def test_recovers_the_live_miss(self):
+        self.assertEqual(
+            dx_boundary_correction("O26TRUD", "OO26TRUDO"), "OO26TRUDO"
+        )
+
+    def test_recovers_a_single_leading_or_trailing_drop(self):
+        self.assertEqual(dx_boundary_correction("O26TRUD", "OO26TRUD"), "OO26TRUD")
+        self.assertEqual(dx_boundary_correction("O26TRUD", "O26TRUDO"), "O26TRUDO")
+
+    def test_no_correction_when_already_exact(self):
+        self.assertIsNone(dx_boundary_correction("MM3NDH", "MM3NDH"))
+
+    def test_no_correction_without_a_dx_spot(self):
+        self.assertIsNone(dx_boundary_correction("MM3NDH", ""))
+
+    def test_no_correction_when_not_a_contiguous_substring(self):
+        # A swap in the middle, not just clipped edges -- do not paper over it.
+        self.assertIsNone(dx_boundary_correction("MM3NDH", "MM3NXH"))
+
+    def test_no_correction_when_gap_is_too_large(self):
+        # More than DX_BOUNDARY_MAX_DROPPED characters missing is no longer a
+        # clipped edge -- likely a coincidental substring, not a hop straddle.
+        self.assertIsNone(dx_boundary_correction("ABC", "VKABCDEFGH"))
+
+    def test_no_correction_when_candidate_too_short(self):
+        # Below DX_BOUNDARY_MIN_CANDIDATE_LEN, a short fragment matching
+        # somewhere in a longer spot is too easily a coincidence to trust.
+        self.assertIsNone(dx_boundary_correction("ABC", "VABCD"))
 
 
 class TestTokenise(unittest.TestCase):

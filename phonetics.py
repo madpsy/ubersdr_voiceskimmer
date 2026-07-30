@@ -1192,3 +1192,41 @@ def normalise_callsign(call: str) -> str:
     if len(right) > len(left):
         return right
     return left
+
+
+# Boundary-clip correction against a DX spot ---------------------------------
+#
+# A hop-straddling utterance can lose a phonetic word off each end of the
+# recording — the leading/trailing audio simply isn't in the segment. Since
+# one ITU phonetic word maps to exactly one callsign character, that failure
+# mode costs a few characters at most, never a chunk in the middle. When the
+# decoded candidate lines up as a contiguous substring of the (manually
+# entered, so trusted) DX spot for the same frequency, missing only a small,
+# bounded number of characters off the ends, recover the spot's callsign
+# rather than the truncated decode.
+DX_BOUNDARY_MAX_DROPPED = 3
+DX_BOUNDARY_MIN_CANDIDATE_LEN = 4
+
+
+def dx_boundary_correction(normalised: str, dx_callsign: str) -> Optional[str]:
+    """
+    Recover a callsign clipped at a hop boundary, using a manually-entered DX
+    spot for the same frequency as the source of truth.
+
+    Returns the corrected (normalised) callsign, or None if `normalised`
+    already matches, isn't a clean boundary-trimmed substring of the spot, or
+    the gap is too large to trust.
+    """
+    if not dx_callsign or not normalised:
+        return None
+    dx_norm = normalise_callsign(dx_callsign)
+    if dx_norm == normalised:
+        return None
+    if len(normalised) < DX_BOUNDARY_MIN_CANDIDATE_LEN:
+        return None
+    dropped = len(dx_norm) - len(normalised)
+    if not (0 < dropped <= DX_BOUNDARY_MAX_DROPPED):
+        return None
+    if normalised not in dx_norm:
+        return None
+    return dx_norm

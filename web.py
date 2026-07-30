@@ -770,6 +770,7 @@ class WebUI:
             # corroboration against the DX cluster's own spots
             "dx_spot": entry.get("dx_spot", ""),
             "agrees_with_dx_spot": entry.get("agrees_with_dx_spot", False),
+            "dx_corrected": entry.get("dx_corrected", False),
         }
 
     def query_spots(self, args) -> Dict[str, Any]:
