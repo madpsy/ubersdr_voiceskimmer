@@ -344,18 +344,19 @@ class WebUI:
         # and overwrites it on every re-hearing, so a station active for six
         # hours leaves a single point at the end.
         #
-        # Distinct callsigns per bucket rather than raw events, for both
-        # series. push_confirmed fires on every validated decode, so counting
-        # events would let one chatty station tower over a band full of
-        # quieter ones; and a re-spot after the cooldown is the same station
-        # again, not a new one. So both series read as "stations active".
-        self._history: Dict[Tuple[int, str], Dict[str, Set[str]]] = {}
-        # Submissions per callsign, all frequencies. The only part of the
-        # top-callsigns chart that cannot be derived: _confirmed carries
-        # hit_count so confirmed hits add up across a station's frequencies,
-        # but it records only the LAST spot time, and _spots is a capped
-        # deque so counting from it would silently undercount a long run.
-        self._spot_counts: Dict[str, int] = {}
+        # Counts per callsign, so one accumulator serves both charts:
+        #
+        #   per-band-per-hour  uses the NUMBER OF CALLSIGNS in a bucket.
+        #       Distinct rather than raw events, because push_confirmed fires
+        #       on every validated decode and counting events would let one
+        #       chatty station tower over a band full of quieter ones.
+        #   top callsigns      sums the COUNTS across the window.
+        #       Total hits and total submissions per station, which is what
+        #       that chart asks for.
+        #
+        # Both views are windowed by the same pruning, so both are a rolling
+        # 24 hours and cannot disagree about what happened.
+        self._history: Dict[Tuple[int, str], Dict[str, Dict[str, int]]] = {}
         self._targets: List[Dict[str, Any]] = []
         self._stats: Dict[str, Any] = {}
 
@@ -529,9 +530,9 @@ class WebUI:
         bucket = int(time.time() // self.HISTORY_BUCKET_SECONDS)
         entry = self._history.get((bucket, band))
         if entry is None:
-            entry = {"confirmed": set(), "spotted": set()}
+            entry = {"confirmed": {}, "spotted": {}}
             self._history[(bucket, band)] = entry
-        entry[kind].add(callsign)
+        entry[kind][callsign] = entry[kind].get(callsign, 0) + 1
 
         # Drop anything that has fallen out of the window. Cheap because the
         # map only ever holds a day's worth of (bucket, band) pairs.
@@ -541,46 +542,54 @@ class WebUI:
 
     def top_callsigns(self, limit: int = 10) -> List[Dict[str, Any]]:
         """
-        The busiest callsigns, aggregated across every frequency they were
-        heard on, most confirmed hits first.
+        The busiest callsigns over the same rolling 24 hours as the per-band
+        chart, aggregated across every frequency, most hits first.
 
-        Confirmed hits are summed from _confirmed's own hit_count rather than
-        counted separately, so the chart and the confirmed table can never
-        disagree — a station on two bands is two rows there and one entry
-        here. Submissions come from _spot_counts, which exists because that
-        total is the one thing not already recorded.
+        Summed from the same _history buckets that chart reads, so the two
+        cannot disagree and both age out together. Deliberately NOT taken from
+        _confirmed's hit_count or a lifetime spot counter — those are totals
+        since the scanner started, which would have made this chart drift
+        further from the one above it the longer a run went on.
         """
+        current = int(time.time() // self.HISTORY_BUCKET_SECONDS)
+        first = current - self.HISTORY_BUCKETS + 1
+
         with self._lock:
             agg: Dict[str, Dict[str, Any]] = {}
+            for (bucket, band), counts in self._history.items():
+                if bucket < first:
+                    continue
+                for kind in ("confirmed", "spotted"):
+                    for call, n in counts[kind].items():
+                        row = agg.setdefault(call, {
+                            "confirmed": 0, "spotted": 0, "bands": set(),
+                        })
+                        row[kind] += n
+                        if band:
+                            row["bands"].add(band)
+            # Identity comes from the confirmed table rather than the history
+            # buckets, which hold only counts. A callsign's country does not
+            # change, so reading it from the lifetime record is safe even
+            # though the counts beside it are windowed.
+            meta: Dict[str, Tuple[str, str]] = {}
             for entry in self._confirmed.values():
                 call = entry.get("normalised") or ""
-                if not call:
-                    continue
-                row = agg.setdefault(call, {
-                    "confirmed": 0, "bands": set(), "country_code": "",
-                    "country": "", "last_heard": 0.0,
-                })
-                row["confirmed"] += entry.get("hit_count", 1) or 1
-                if entry.get("band"):
-                    row["bands"].add(entry["band"])
-                if entry.get("country_code") and not row["country_code"]:
-                    row["country_code"] = entry["country_code"]
-                    row["country"] = entry.get("country", "")
-                row["last_heard"] = max(row["last_heard"], entry.get("timestamp") or 0)
-            spots = dict(self._spot_counts)
+                if call and call not in meta:
+                    meta[call] = (
+                        entry.get("country_code", ""), entry.get("country", "")
+                    )
 
-        rows = [
-            {
+        rows = []
+        for call, row in agg.items():
+            code, country = meta.get(call, ("", ""))
+            rows.append({
                 "callsign": call,
                 "confirmed": row["confirmed"],
-                "spotted": spots.get(call, 0),
+                "spotted": row["spotted"],
                 "bands": sorted(row["bands"]),
-                "country_code": row["country_code"],
-                "country": row["country"],
-                "last_heard": row["last_heard"],
-            }
-            for call, row in agg.items()
-        ]
+                "country_code": code,
+                "country": country,
+            })
         # Most hits first; callsign as the tiebreak so equal counts do not
         # shuffle between refreshes and make the chart look alive.
         rows.sort(key=lambda r: (-r["confirmed"], r["callsign"]))
@@ -600,6 +609,9 @@ class WebUI:
         first = current - self.HISTORY_BUCKETS + 1
 
         with self._lock:
+            # len() of the per-callsign counter is the number of DISTINCT
+            # callsigns in that bucket, which is what this chart shows. The
+            # counts themselves are what top_callsigns sums.
             snapshot = {
                 key: {k: len(v) for k, v in val.items()}
                 for key, val in self._history.items()
@@ -1056,7 +1068,6 @@ class WebUI:
             if key in self._confirmed:
                 self._confirmed[key]["spotted_at"] = entry["time"]
             self._record_history("spotted", band, callsign)
-            self._spot_counts[callsign] = self._spot_counts.get(callsign, 0) + 1
         self._broadcast("spot", entry)
 
     def set_worker_status(self, worker: int, connected: bool, detail: str = "") -> None:

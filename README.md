@@ -92,12 +92,18 @@ being dominated by whichever operator talked most. The window is rolling and
 always a full 24 hours, so a quiet night reads as quiet rather than as a
 missing axis.
 
-Under it, **top callsigns** shows the ten busiest stations since the scanner
-started, two bars each: confirmed hits and DX submissions. Hits are summed
+Under it, **top callsigns** shows the ten busiest stations over the same rolling
+24 hours, two bars each: confirmed hits and DX submissions. Hits are summed
 across every frequency a station was heard on — two rows in the confirmed table
 are one bar here. The bars sit side by side rather than stacked, because a
-submission is a subset of the hits and adding them would mean nothing. Unlike
-the chart above it, this one is since start, not a rolling window.
+submission is a subset of the hits and adding them would mean nothing.
+
+Both charts are summed from the same hourly buckets, so they age out together
+and cannot disagree about what happened. Note the two read those buckets
+differently, which is deliberate: the per-band chart counts *distinct
+callsigns* per hour, so one talkative station cannot tower over a band full of
+quieter ones, while this one counts *total hits*, which is the question it is
+asking.
 
 The **map** plots stations against the receiver, using the coordinates QRZ
 returns (falling back to the DXCC entity centre from CTY). Confirmed and
@@ -336,7 +342,7 @@ durable record. Nothing here is authenticated — see the note on exposure in
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/state` | Full dashboard snapshot (workers, transcript tail, confirmed, spots, targets, stats). |
-| `GET /api/history` | Per-band activity over a rolling 24 hours, one bucket per hour, plus `top_callsigns` — both of the dashboard's charts from one poll. Always 24 buckets, zero-filled. The per-hour series count **distinct callsigns** per bucket, not events; `top_callsigns` counts total hits since start. |
+| `GET /api/history` | Per-band activity over a rolling 24 hours, one bucket per hour, plus `top_callsigns` — both of the dashboard's charts from one poll. Always 24 buckets, zero-filled. The per-hour series count **distinct callsigns** per bucket, not events; `top_callsigns` counts total hits per station over the same window. |
 | `GET /api/events` | SSE stream of incremental updates. |
 | `POST /api/explain` | Why a transcript line did or did not yield a callsign. Body `{"text": "..."}`. Rate limited 1/s per address. |
 | `GET /api/audio/<worker>` | Live audio from that worker, WebM/Opus. |

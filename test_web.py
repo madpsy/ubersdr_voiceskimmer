@@ -364,12 +364,16 @@ class TestHistory(unittest.TestCase):
     def setUp(self):
         self.ui = WebUI(workers=1)
 
-    def _seed(self, hours_ago, band, calls, kind="confirmed"):
+    def _seed(self, hours_ago, band, calls, kind="confirmed", times=1):
+        # Mirrors _record_history's shape: per-callsign counts, so len() is the
+        # distinct-callsign figure this chart shows and the counts are what
+        # top_callsigns sums.
         hour = int(time.time() // 3600) - hours_ago
         entry = self.ui._history.setdefault(
-            (hour, band), {"confirmed": set(), "spotted": set()}
+            (hour, band), {"confirmed": {}, "spotted": {}}
         )
-        entry[kind].update(calls)
+        for call in calls:
+            entry[kind][call] = entry[kind].get(call, 0) + times
 
     def test_always_returns_a_full_day(self):
         h = self.ui.history()
@@ -499,6 +503,38 @@ class TestTopCallsigns(unittest.TestCase):
 
     def test_empty_when_nothing_confirmed(self):
         self.assertEqual(self.ui.top_callsigns(), [])
+
+    def test_windowed_to_the_same_24_hours_as_the_band_chart(self):
+        # The whole point of summing from _history rather than _confirmed's
+        # lifetime hit_count: anything older than the window must not count,
+        # or the two charts drift further apart the longer a run goes on.
+        hour = int(time.time() // 3600)
+
+        def seed(hours_ago, band, call, n, kind="confirmed"):
+            e = self.ui._history.setdefault(
+                (hour - hours_ago, band), {"confirmed": {}, "spotted": {}})
+            e[kind][call] = e[kind].get(call, 0) + n
+
+        seed(0, "20m", "RECENT", 5)
+        seed(23, "20m", "EDGE", 3)          # just inside
+        seed(25, "20m", "OLD", 99)          # just outside
+        seed(40, "20m", "ANCIENT", 99)
+        rows = {r["callsign"]: r["confirmed"] for r in self.ui.top_callsigns()}
+        self.assertEqual(rows.get("RECENT"), 5)
+        self.assertEqual(rows.get("EDGE"), 3)
+        self.assertNotIn("OLD", rows)
+        self.assertNotIn("ANCIENT", rows)
+
+    def test_hits_and_distinct_counts_come_from_one_source(self):
+        # Same buckets, read two ways: the band chart wants distinct callsigns
+        # per hour, this one wants total hits.
+        self._hear("G0VIM", "20m", 14226000, 6)
+        self._hear("DL2BHM", "20m", 14188000, 2)
+        top = {r["callsign"]: r["confirmed"] for r in self.ui.top_callsigns()}
+        self.assertEqual(top["G0VIM"], 6)
+        self.assertEqual(top["DL2BHM"], 2)
+        current = self.ui.history()["buckets"][-1]
+        self.assertEqual(current["confirmed"], {"20m": 2})   # two distinct
 
     def test_served_with_the_history_payload(self):
         # One poll draws both charts.

@@ -1035,7 +1035,8 @@
     const note = document.getElementById("top-note");
     if (note) {
       note.textContent = rows.length
-        ? "hits are every validated decode, summed across all frequencies"
+        ? "hits are every validated decode in the last 24 hours, summed " +
+          "across all frequencies"
         : "no callsigns confirmed yet";
     }
   }
