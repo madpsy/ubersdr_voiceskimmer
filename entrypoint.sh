@@ -32,6 +32,12 @@
 #   SILENCE_MIN_WORDS     Fallback word count when the server sends no signal
 #                         data (version 1, or no channel status)   (default: 3)
 #   MIN_EXTRACT_CONFIDENCE  Extractor confidence gate, 0-1         (default: 0.4)
+#   PARTIAL_EXTRACTION    Set to 0 to only extract callsigns from completed
+#                         segments (the previous behaviour). Default is to
+#                         also extract from Whisper's in-progress hypothesis
+#                         for each segment, since it is sometimes cleaner than
+#                         the finalised re-decode a completed segment replaces
+#                         it with.
 #   LOOKUP_INTERVAL       Seconds between QRZ lookups — set to 6 if this
 #                         instance is not on a bypassed IP          (default: 0)
 #   PROGRESS_INTERVAL     Seconds between progress lines           (default: 60)
@@ -85,6 +91,7 @@ args=""
 [ -n "$LOCK_MODE"            ] && args="$args --lock-mode $LOCK_MODE"
 
 [ -n "$MIN_EXTRACT_CONFIDENCE" ] && args="$args --min-extract-confidence $MIN_EXTRACT_CONFIDENCE"
+[ "$PARTIAL_EXTRACTION" = "0" ] && args="$args --no-partial-extraction"
 [ -n "$LOOKUP_INTERVAL"      ] && args="$args --lookup-interval $LOOKUP_INTERVAL"
 [ -n "$PROGRESS_INTERVAL"    ] && args="$args --progress-interval $PROGRESS_INTERVAL"
 

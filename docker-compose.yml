@@ -128,6 +128,20 @@ services:
       # MIN_EXTRACT_CONFIDENCE: "0.4"     # raise for precision, lower for recall
       MIN_CALLSIGN_LENGTH: "5"          # gates the QRZ lookup, not just spotting
       #
+      # By default, callsign extraction also runs on Whisper's in-progress
+      # (not yet completed) hypothesis for each segment, alongside the
+      # completed segment as before. Interim text is sometimes cleaner than
+      # the finalised re-decode a completed segment replaces it with —
+      # observed live, a callsign legible while the line was still updating
+      # came out scrambled once Whisper committed to a final version.
+      # Validation/spotting still go through the normal QRZ cache and
+      # per-callsign dedup either way, so this does not multiply lookups or
+      # announcements.
+      #
+      # Set to 0 to revert to the previous behaviour: only completed segments
+      # are extracted from.
+      # PARTIAL_EXTRACTION: "0"
+      #
       # Set to 6 if this instance is NOT on a bypassed IP — the default lookup
       # limit is 10/minute and you will otherwise see 429s and unvalidated
       # candidates. Check with: scanner.py --check

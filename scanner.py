@@ -906,9 +906,17 @@ class CallsignScanner:
             # Incomplete segments are re-sent repeatedly as Whisper's
             # transcription of the same utterance grows, and would inflate
             # the silence word-count if counted here — only completed
-            # segments go on to attribution, counting, and extraction. The
-            # in-progress line is still shown, tagged with where we are now,
-            # which is the best available for audio still arriving.
+            # segments go on to counting. The in-progress line is still
+            # shown, tagged with where we are now, which is the best
+            # available for audio still arriving.
+            #
+            # Extraction, unless disabled, DOES run on these: Whisper's
+            # interim hypothesis is sometimes cleaner than the finalised
+            # re-decode a completed segment replaces it with (observed live —
+            # a callsign legible while the line was still updating came out
+            # scrambled once Whisper committed to a final version). See
+            # _process_partial for what's deliberately skipped versus the
+            # completed path.
             if not segment.completed:
                 if self.web:
                     live = self.timeline.current()
@@ -917,6 +925,8 @@ class CallsignScanner:
                         live.band if live else "", live.dial_freq if live else 0,
                         False, segment.text,
                     )
+                if not self.args.no_partial_extraction:
+                    self._process_partial(segment)
                 continue
 
             duration = max(segment.end - segment.start, 0.0)
@@ -1028,6 +1038,50 @@ class CallsignScanner:
                         time.time()
                         + self.args.dwell_extension * self._dwell_scale,
                     )
+
+    def _process_partial(self, segment: Segment) -> None:
+        """
+        Extract callsigns from an in-progress segment, using whatever
+        Whisper has produced so far.
+
+        Deliberately skips everything the completed path does around
+        _process itself: no silence word-count (the same growing text
+        arrives repeatedly and would inflate it), no duplicate-after-hop
+        tracking (the text keeps changing anyway, so a stale copy would
+        rarely match byte-for-byte), and no segment-join history (that
+        exists to stitch completed segments across a forced VAD break,
+        which does not apply to a segment still being written). Validation,
+        confirmation, and spotting all still go through the ordinary
+        _process, so the same QRZ cache and per-callsign dedup apply — a
+        callsign extracted from ten successive growing partials is looked
+        up once and announced once.
+        """
+        duration = max(segment.end - segment.start, 0.0)
+        attribution = self.timeline.attribute(segment.received_at, duration)
+        target = attribution.target
+        if target is None:
+            return
+
+        current = self.timeline.current()
+        is_live_target = current is not None and current.key == target.key
+
+        detections = self._process(segment, target, attribution, set())
+        validated_count = sum(1 for d in detections if d.validated)
+        self.tracker.record_success(target, validated_count)
+
+        # As with the completed path: only the dwell we are still sitting on
+        # should react to what was just heard.
+        if not is_live_target:
+            return
+
+        if validated_count > 0:
+            self._success_event.set()
+        elif detections:
+            with self._extend_lock:
+                self._extend_until = max(
+                    self._extend_until,
+                    time.time() + self.args.dwell_extension * self._dwell_scale,
+                )
 
     def _joined_history_text(self, segment: Segment) -> Optional[str]:
         """
@@ -1542,6 +1596,17 @@ def parse_args(argv=None):
                               "even mid-utterance with no real pause, which "
                               "otherwise splits a spelled callsign in two. "
                               "0 disables joining.")
+    extract.add_argument("--no-partial-extraction", action="store_true",
+                         help="Only extract callsigns from completed segments, "
+                              "the previous behaviour. By default, extraction "
+                              "also runs on Whisper's in-progress (not yet "
+                              "completed) hypothesis for each segment — its "
+                              "interim text is sometimes cleaner than the "
+                              "finalised re-decode a completed segment "
+                              "replaces it with. Validation and spotting still "
+                              "go through the normal QRZ cache and per-callsign "
+                              "dedup either way, so this does not multiply "
+                              "lookups or announcements.")
 
     whisper = parser.add_argument_group("whisper")
     whisper.add_argument("--prompt", default=DEFAULT_PROMPT,
@@ -1698,6 +1763,8 @@ def build_settings(args) -> List[Dict[str, Any]]:
             {"label": "CTY prefilter", "value": "Skipped" if args.no_prefilter else "Enabled"},
             {"label": "Segment join gap",
              "value": _fmt_secs(args.segment_join_gap) if args.segment_join_gap else "Disabled"},
+            {"label": "Extract from in-progress segments",
+             "value": _fmt_bool(not args.no_partial_extraction)},
         ]},
         {"group": "Whisper", "items": [
             {"label": "Initial prompt", "value": args.prompt or "(none)"},
