@@ -21,7 +21,7 @@
 #                         seconds counts as a revisit               (default: 900)
 #   REVISIT_DWELL_PERCENT Fraction of the normal dwell times to spend on such a
 #                         revisit; 1.0 = no reduction               (default: 0.50)
-#   MIN_SNR               Ignore activity below this SNR         (default: 8)
+#   MIN_SNR               Ignore activity below this SNR         (default: 20)
 #   MIN_CONFIDENCE        Ignore activity below this confidence   (default: 0.7)
 #   SILENCE_MIN_SNR       Peak SNR (dB) within SILENCE_TIMEOUT for a frequency
 #                         to count as active (default: 40). Measured from the

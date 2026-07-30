@@ -183,7 +183,7 @@ exact frequency, so on a quiet instance expect zeroes.
 | `--revisit-cooldown` | 120 s | How long before a frequency may be revisited at all |
 | `--revisit-dwell-period` | 900 s | A frequency this scanner has already submitted a DX spot from within this long counts as a *revisit*. No effect without `--spot` |
 | `--revisit-dwell-percent` | 0.50 | Fraction of the normal dwell times to spend on such a revisit. `1.0` treats it like anything else |
-| `--min-snr` | 8.0 | Raise to skip marginal signals. A **per-channel** SNR, filtering the server's activity feed — not the same scale as `--silence-min-snr` |
+| `--min-snr` | 20.0 | Raise to skip marginal signals. A **per-channel** SNR, filtering the server's activity feed — not the same scale as `--silence-min-snr` |
 | `--min-extract-confidence` | 0.4 | Raise for precision, lower for recall |
 | `--min-callsign-length` | 4 | Minimum callsign length to be looked up at all — shorter ones never reach QRZ, so are never confirmed or spotted. Applies to literal verbatim matches too |
 | `--pipeline-latency` | 2.0 s | Raise if your WhisperLive is slow (affects frequency attribution) |
@@ -395,7 +395,7 @@ Every `scanner.py` flag has an environment-variable equivalent (see
 | `BAND` | `--band` | all bands |
 | `DWELL` / `MAX_DWELL` | `--dwell`/`--max-dwell` | `30` / `60` |
 | `REVISIT_DWELL_PERIOD` / `REVISIT_DWELL_PERCENT` | `--revisit-dwell-period`/`--revisit-dwell-percent` | `900` / `0.50` |
-| `MIN_SNR` / `MIN_CONFIDENCE` | `--min-snr`/`--min-confidence` | `8` / `0.7` |
+| `MIN_SNR` / `MIN_CONFIDENCE` | `--min-snr`/`--min-confidence` | `20` / `0.7` |
 | `LOCK_FREQ` / `LOCK_MODE` | `--lock-freq`/`--lock-mode` | — (hop normally) |
 | `STOCK_WHISPER` | `--stock-whisper` | off |
 | `SPOT` / `SPOTTER_CALL` / `SPOTTER_PASS` | `--spot`/`--spotter-call`/`--spotter-pass` | off / — / — |
@@ -538,11 +538,17 @@ so far apart:
 
 | | Source | Scale |
 |---|---|---|
-| `--min-snr` | the server's voice activity feed | Per-channel SNR: the detected region's average power minus the median noise floor (`voice_activity.go`). The server's own detector only looks for regions 6–10 dB above noise, so 8 sits mid-range of what is reported at all. |
+| `--min-snr` | the server's voice activity feed | Per-channel SNR: the detected region's average power minus the median noise floor (`voice_activity.go`). |
 | `--silence-min-snr` | the audio frame headers, measured here | `basebandPower − noiseDensity` — power vs noise **density**, the server's own `min_snr` definition. Runs about 34.8 dB higher for the same signal (10·log10 of a 3 kHz channel). |
 
-So 40 on the silence scale is roughly 5 dB of channel SNR — in the same
-ballpark as `--min-snr`'s 8. Only the scales differ.
+So 40 on the silence scale is roughly 5 dB of channel SNR. The two numbers look
+wildly different only because the scales are.
+
+The feed in practice reports only signals well clear of the noise, so its values
+run far above the 6–10 dB its detector nominally looks for. Sampled live across
+three bands: 16 signals, 20.3 dB lowest, 25.7 median, 32.2 highest — which is
+why the default is 20 and not something lower. At 8 the threshold discarded
+nothing at all.
 
 **Do not copy 40 into `--min-snr`.** It would demand a 40 dB per-channel SNR
 from the activity feed, nothing would clear it, and the scanner would sit with

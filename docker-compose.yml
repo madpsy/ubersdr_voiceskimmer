@@ -76,15 +76,20 @@ services:
       #
       # MIN_SNR is a PER-CHANNEL SNR in dB, filtering the server's voice
       # activity feed. The server computes it as the detected region's average
-      # power minus the median noise floor (voice_activity.go), and its own
-      # detector only looks for regions 6-10 dB above noise — so 8 sits in the
-      # middle of the range anything is reported in at all.
+      # power minus the median noise floor (voice_activity.go).
+      #
+      # In practice the feed only reports signals well clear of the noise, so
+      # the values arriving are much higher than the 6-10 dB its detector
+      # nominally looks for. Sampled live across 3 bands: 16 signals, 20.3 dB
+      # lowest, 25.7 median, 32.2 highest — a threshold of 8 discarded nothing
+      # at all. 20 trims the weakest without gutting the list; raise toward 25
+      # to chase only the strong ones.
       #
       # NOTE this is NOT the same scale as SILENCE_MIN_SNR below, despite both
       # being "SNR in dB". That one is power vs noise DENSITY and runs about
       # 34.8 dB higher for the same signal. Do not copy 40 up here: it would
       # demand a 40 dB channel SNR and the scanner would find nothing to scan.
-      # MIN_SNR: "8"
+      # MIN_SNR: "20"
       # MIN_CONFIDENCE: "0.7"
       #
       # How a frequency is judged quiet. SNR is measured directly from the

@@ -1260,7 +1260,7 @@ def parse_args(argv=None):
                            "Ignored when every target is in cooldown.")
     # NB: a per-channel SNR, unlike --silence-min-snr, which is power vs noise
     # density and runs ~34.8 dB higher for the same signal. See that flag.
-    scan.add_argument("--min-snr", type=float, default=8.0,
+    scan.add_argument("--min-snr", type=float, default=20.0,
                       help="Ignore activity below this SNR")
     scan.add_argument("--min-confidence", type=float, default=0.7,
                       help="Ignore activity below this detector confidence")
