@@ -322,6 +322,7 @@ class MinimalRadio {
             this.ws.onopen = () => {
                 console.log('WebSocket connected (Opus format)');
                 this.sendTuneCommand();
+                this.sendAGCCommand();
             };
 
             this.ws.onmessage = async (event) => {
@@ -372,6 +373,21 @@ class MinimalRadio {
             };
             this.ws.send(JSON.stringify(message));
             // Tune command sent (logging disabled to reduce console spam)
+        }
+    }
+
+    // Send AGC overrides to server. Session-scoped: the server persists these
+    // and reapplies them itself across mode changes/retunes, so this only
+    // needs to be sent once per connection (on open), not on every tune.
+    sendAGCCommand() {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            const message = {
+                type: 'set_agc',
+                agcHangTime: 1.0,
+                agcRecoveryRate: 100.0,
+                agcThreshold: -10.0
+            };
+            this.ws.send(JSON.stringify(message));
         }
     }
     

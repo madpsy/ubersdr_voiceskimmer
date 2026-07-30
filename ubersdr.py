@@ -59,6 +59,14 @@ BANDWIDTH_BY_MODE = {
     "lsb": (-2400, -50),
 }
 
+# AGC overrides applied once per session (websocket.go stores these on the
+# session and reapplies them itself after every mode change/retune, so unlike
+# BANDWIDTH_BY_MODE this must NOT be resent on tune() — only on a fresh
+# connection, i.e. a new UberSDRSession after a reconnect).
+AGC_HANG_TIME = 1.0        # seconds (valid range 0.0-10.0)
+AGC_RECOVERY_RATE = 100.0  # dB/s (valid range 1.0-100.0)
+AGC_THRESHOLD = -10.0      # dB relative to headroom (valid range -30.0-0.0)
+
 # Binary message types from the whisper extension (audio_extensions/whisper/decoder.go)
 MSG_SEGMENTS = 0x02
 MSG_LANGUAGE = 0x03
@@ -307,6 +315,12 @@ class UberSDRSession:
         # The mute_updated reply doubles as our proof the session is live.
         self._send_audio({"type": "set_mute", "muted": True})
         self._send_bandwidth(self.mode)
+        self._send_audio({
+            "type": "set_agc",
+            "agcHangTime": AGC_HANG_TIME,
+            "agcRecoveryRate": AGC_RECOVERY_RATE,
+            "agcThreshold": AGC_THRESHOLD,
+        })
 
     def _on_audio_message(self, ws, message) -> None:
         # Binary frames are audio/silence packets. We never decode the audio
