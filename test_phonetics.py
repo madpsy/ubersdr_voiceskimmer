@@ -499,6 +499,22 @@ class TestSpelledLetterBlocks(unittest.TestCase):
         ]:
             self.assertEqual(calls(text), [], text)
 
+    def test_vowel_free_abbreviations_excluded_from_the_blob_rule(self):
+        # CAPS_NON_CALLSIGN entries that are themselves vowel-free (QSL, QRZ,
+        # CW, SSB, HR, WX, TV, ...) would otherwise match the vowel-free
+        # consonant-blob rule in _token_mapping and be scored as ordinary
+        # loose evidence, same failure mode as the QSL case above but for the
+        # rest of the list.
+        for text in [
+            "Mike Zero QRZ again",
+            "Mike Zero CW only",
+            "Mike Zero SSB please",
+            "Mike Zero HR now",
+            "Mike Zero WX report",
+            "Mike Zero TV interference",
+        ]:
+            self.assertEqual(calls(text), [], text)
+
     def test_lowercase_words_are_not_treated_as_letters(self):
         # Same shape, but not capitalised — an ordinary word, not spelling.
         self.assertEqual(calls("Yeah, Mike 0 abg, listing 40s."), [])
@@ -780,6 +796,10 @@ class TestLiveMissRegressions(unittest.TestCase):
         ),
         ("All the best, 2E1, G.A.F.", "2E1GAF"),
         ("Mike 7 November kilo whiskey", "M7NKW"),
+        (
+            "Yeah, the Golf One Kilo Oskah Hotel, yeah, you called in yesterday, didn't you?",
+            "G1KOH",
+        ),
     ]
 
     def test_each_segment_yields_its_callsign(self):

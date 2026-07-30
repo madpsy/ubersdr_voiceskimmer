@@ -26,9 +26,31 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Weighted evidence a run must carry before it can become a candidate: 2
-# points per strict char, 2/3 per loose char, +2 for a cue. Named so the
-# joined-callsign split and the trim loop cannot drift apart, and so the
-# /api/explain endpoint reports the same number the gate actually applies.
+# points per strict char, LOOSE_CHAR_WEIGHT per loose char, +2 for a cue.
+# Named so the joined-callsign split and the trim loop cannot drift apart,
+# and so the /api/explain endpoint reports the same numbers the gate
+# actually applies.
+#
+# LOOSE_CHAR_WEIGHT is bumped from the original 2/3 (raised because many
+# genuine callsigns only ever reach LOOSE_MAP — ASR mishears the strict NATO
+# word into a geographic/name alternative, as "oskah" did for "Oscar").
+#
+# It is hard-capped just under 1.0. At 1.0 exactly, "a e i o u are the vowels
+# in english" — 4 bare single letters/digits, no strict evidence, no cue —
+# scores identically to a genuine 4-char uncued loose run and produces EI0U
+# (see test_bare_digits_and_letters_in_ordinary_speech). That is a real
+# collision, not a corpus artifact: people really do recite the vowels like
+# that, so the weight cannot reach 1.0 without risking exactly that false
+# positive on ordinary speech.
+#
+# (A lower wall used to sit at 0.8 — a Q-code/abbreviation, e.g. "QSL" in
+# "Mike Zero QSL", is itself vowel-free and was being scored as ordinary loose
+# evidence by the consonant-blob rule in _token_mapping, absorbing it into
+# M0QSL. Fixed at the root by excluding CAPS_NON_CALLSIGN from that rule,
+# rather than by keeping the weight below it.)
+STRICT_CHAR_WEIGHT = 2.0
+LOOSE_CHAR_WEIGHT = 0.95
+CUE_BONUS = 2.0
 EVIDENCE_THRESHOLD = 4.0
 
 # ---------------------------------------------------------------------------
@@ -108,6 +130,7 @@ LOOSE_LETTERS: Dict[str, str] = {
     "nairobi": "N", "norman": "N",
     "ontario": "O", "ocean": "O", "oboe": "O", "oslo": "O",
     "oxford": "O", "ottawa": "O", "oscar!": "O",
+    "oskah": "O",  # common ASR mishearing of "Oscar" (observed live)
     "portugal": "P", "peter": "P", "pacific": "P", "paris": "P",
     "panama": "P", "poland": "P", "papa!": "P",
     "queen": "Q", "quebec!": "Q", "quito": "Q",
@@ -237,6 +260,22 @@ ALNUM_NON_CALLSIGN = {
     "Q5", "FT8", "FT4", "JS8", "PSK", "AM", "FM",
 }
 
+# Written in caps by Whisper but never part of a callsign — the on-air
+# Q-codes and abbreviations that sit right next to one constantly. Same
+# reasoning as leaving "roger" out of the letter map. Defined here (rather
+# than only where it was originally used, in _spelled_positions_from) because
+# _token_mapping's vowel-free blob rule below needs it too: most of these
+# (QSL, QRZ, CQ, DX, CW, SSB, FM, PM, HR, WX, TV, ...) are themselves
+# vowel-free, so without this exclusion the blob rule maps them as ordinary
+# loose evidence and "Mike Zero QSL" assembles as M0QSL.
+CAPS_NON_CALLSIGN = {
+    "QSL", "QRZ", "QRM", "QRN", "QTH", "QSO", "QSY", "QRP", "QRT", "QSB",
+    "CQ", "DX", "CW", "SSB", "FM", "AM", "PM", "USB", "LSB", "RST", "RTTY",
+    "TNX", "THX", "UTC", "GMT", "OM", "YL", "XYL", "PSE", "AGN", "HR", "UR",
+    "WX", "PWR", "RIG", "ANT", "OK", "TV", "USA", "UK", "EU", "US", "ID",
+    "NO", "SO", "IT", "AT", "IN", "ON", "TO", "BE", "WE", "HE", "MY", "BY",
+}
+
 
 def _token_mapping(token: str) -> Optional[Tuple[str, bool]]:
     """Return (chars, is_strict) if `token` contributes to a callsign run."""
@@ -254,9 +293,18 @@ def _token_mapping(token: str) -> Optional[Tuple[str, bool]]:
     # with no separating space (observed live: "JXG" for part of MI3JXG).
     # Loose, not strict: still needs corroborating evidence via the usual
     # gate before a run is promoted, which is what keeps genuine vowel-free
-    # abbreviations ("TV", "CNN", "NYC") from causing false positives on
-    # their own — verified in test_vowelless_blob_letters.
-    if 2 <= len(token) <= 5 and token.isalpha() and not any(c in _VOWELS for c in token):
+    # abbreviations ("CNN", "NYC") from causing false positives on their own
+    # — verified in test_vowelless_blob_letters. Known on-air Q-codes and
+    # abbreviations (many of which are themselves vowel-free — "QSL", "CQ",
+    # "DX", "TV", ...) are excluded outright rather than left to the evidence
+    # gate: they sit directly next to callsigns constantly, so leaving them
+    # to chance risks absorbing them ("Mike Zero QSL" -> M0QSL).
+    if (
+        2 <= len(token) <= 5
+        and token.isalpha()
+        and not any(c in _VOWELS for c in token)
+        and token.upper() not in CAPS_NON_CALLSIGN
+    ):
         return token.upper(), False
     # Hyphen-joined single characters ("I-0-W-F-T") — the tokenizer keeps
     # internal hyphens so "x-ray" survives as one word, but that means a
@@ -559,19 +607,6 @@ def normalise_text(text: str) -> str:
 def tokenise(text: str) -> List[str]:
     return TOKEN_RE.findall(normalise_text(text))
 
-
-# Written in caps by Whisper but never part of a callsign — the on-air
-# Q-codes and abbreviations that sit right next to one constantly. Without
-# these, "Mike Zero QSL" would assemble as M0QSL. Same reasoning as leaving
-# "roger" out of the letter map.
-CAPS_NON_CALLSIGN = {
-    "QSL", "QRZ", "QRM", "QRN", "QTH", "QSO", "QSY", "QRP", "QRT", "QSB",
-    "CQ", "DX", "CW", "SSB", "FM", "AM", "PM", "USB", "LSB", "RST", "RTTY",
-    "TNX", "THX", "UTC", "GMT", "OM", "YL", "XYL", "PSE", "AGN", "HR", "UR",
-    "WX", "PWR", "RIG", "ANT", "OK", "TV", "USA", "UK", "EU", "US", "ID",
-    "NO", "SO", "IT", "AT", "IN", "ON", "TO", "BE", "WE", "HE", "MY", "BY",
-}
-
 # Same normalisation as normalise_text/tokenise but WITHOUT lowercasing, so
 # token i here is token i there. Case is the signal that separates letters
 # Whisper spelled out ("ABG") from an ordinary word ("and") — see
@@ -772,7 +807,10 @@ def extract_phonetic(
                 "strict_chars": full_strict,
                 "loose_chars": full_loose,
                 "evidence": round(
-                    2 * full_strict + (2 / 3) * full_loose + (2 if cued else 0), 2
+                    STRICT_CHAR_WEIGHT * full_strict
+                    + LOOSE_CHAR_WEIGHT * full_loose
+                    + (CUE_BONUS if cued else 0),
+                    2,
                 ),
                 "threshold": EVIDENCE_THRESHOLD,
                 "attempts": [],
@@ -800,7 +838,9 @@ def extract_phonetic(
             # accounts for every character is itself the evidence that the
             # split is real.
             split_evidence = (
-                2 * run_strict + (2 / 3) * run_loose + (2 if cued else 0)
+                STRICT_CHAR_WEIGHT * run_strict
+                + LOOSE_CHAR_WEIGHT * run_loose
+                + (CUE_BONUS if cued else 0)
             )
             if record is not None:
                 record["split_into"] = list(joined)
@@ -875,16 +915,20 @@ def extract_phonetic(
                     {p - slice_start for p in spelled if slice_start <= p < slice_end},
                 )
 
-                # Evidence gate, weighted rather than a bare token count: 2
-                # points per strict char, 2/3 per loose char, +2 for a cue;
-                # needs >=4 to pass. This is deliberately permissive on long
-                # all-loose runs (6+ loose chars clears the bar unaided)
-                # because the mandatory embedded-digit shape check above
-                # already rejects the vast majority of coincidental English
-                # word sequences — getting a long run to ALSO alternate
-                # letters/digits correctly is rare. Verified against the
-                # false-positive corpus in test_phonetics.py.
-                evidence = 2 * run_strict + (2 / 3) * run_loose + (2 if cued else 0)
+                # Evidence gate, weighted rather than a bare token count: see
+                # STRICT_CHAR_WEIGHT/LOOSE_CHAR_WEIGHT/CUE_BONUS above; needs
+                # >= EVIDENCE_THRESHOLD to pass. This is deliberately
+                # permissive on long all-loose runs (a handful of loose chars
+                # clears the bar unaided) because the mandatory embedded-digit
+                # shape check above already rejects the vast majority of
+                # coincidental English word sequences — getting a long run to
+                # ALSO alternate letters/digits correctly is rare. Verified
+                # against the false-positive corpus in test_phonetics.py.
+                evidence = (
+                    STRICT_CHAR_WEIGHT * run_strict
+                    + LOOSE_CHAR_WEIGHT * run_loose
+                    + (CUE_BONUS if cued else 0)
+                )
                 if record is not None:
                     record["attempts"].append({
                         "text": text,
