@@ -45,6 +45,12 @@ from web import WebUI
 
 log = logging.getLogger("scanner")
 
+# If no segment — partial or completed — has arrived from Whisper in this
+# long, _watchdog_loop forces a re-attach. Matches the dashboard's own
+# "no activity" indicator (static/app.js ACTIVITY_STALE_MS) so a worker the
+# UI is showing as stalled is also the one the backend is trying to fix.
+WHISPER_STALL_TIMEOUT = 15.0
+
 # Primes Whisper for on-air phonetics. Without this it renders "mike mike three"
 # as prose and drifts toward conversational English; with it, spelled-out
 # callsigns survive far more often. Kept under the 1024-byte server cap.
@@ -227,6 +233,7 @@ class CallsignScanner:
         self._last_key: Optional[tuple] = None
         self._worker: Optional[threading.Thread] = None
         self._web_stats_thread: Optional[threading.Thread] = None
+        self._watchdog_thread: Optional[threading.Thread] = None
         self._extend_lock = threading.Lock()
         self._extend_until = 0.0
         # Set by _on_session_error when a socket drops unexpectedly (not a
@@ -241,6 +248,14 @@ class CallsignScanner:
         # and re-attaches with backoff via _reattach_whisper(), without
         # tearing down the session — see _reconnect() for that heavier path.
         self._whisper_dead = threading.Event()
+        # Timestamp of the last segment (partial or completed) pulled off the
+        # Whisper queue. _watchdog_loop uses this to catch a Whisper
+        # extension that has gone silent without the server ever reporting an
+        # error or closing a socket — _on_session_error has nothing to key
+        # off in that case. Reset on attach so a fresh session/attach gets a
+        # full WHISPER_STALL_TIMEOUT to start producing output before the
+        # watchdog judges it stalled.
+        self._last_segment_at = time.time()
         # Set by _segment_worker the instant a VALIDATED callsign is heard on
         # the frequency we are currently dwelling on; _dwell's wait loop polls
         # this and exits immediately rather than lingering.
@@ -388,6 +403,10 @@ class CallsignScanner:
         self._worker = threading.Thread(target=self._segment_worker, daemon=True)
         self._worker.start()
 
+        self._last_segment_at = time.time()
+        self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self._watchdog_thread.start()
+
         if self.web:
             # Stats and the band/freq activity table need to stay live
             # regardless of dwell length — --progress-interval (5 min
@@ -514,6 +533,7 @@ class CallsignScanner:
                     self.web.set_worker_status(self.worker_id, True, "transcribing")
                 self._session_dead.clear()
                 self._whisper_dead.clear()   # re-attached fresh above
+                self._last_segment_at = time.time()
                 if old_session is not None:
                     old_session.stop()
                 log.info(
@@ -541,8 +561,9 @@ class CallsignScanner:
         failure domain from the session's own websockets — it can die (and
         recover) while the audio/DX sockets stay perfectly healthy, so a
         full _reconnect() would be both unnecessary and slower to recover.
-        Same backoff shape as _reconnect(): 2s doubling to a 30s cap,
-        retried forever while the worker is running.
+        2s doubling to a 10s cap — lighter than _reconnect()'s backoff since
+        a re-attach is a cheap operation on an otherwise-healthy session, not
+        a full socket rebuild — retried forever while the worker is running.
         """
         backoff = 2.0
         while self._running:
@@ -569,6 +590,7 @@ class CallsignScanner:
 
             if self.session.attach_whisper(**attach_kwargs):
                 self._whisper_dead.clear()
+                self._last_segment_at = time.time()
                 if self.web:
                     self.web.set_worker_status(self.worker_id, True, "transcribing")
                 log.info("Whisper extension reattached")
@@ -579,7 +601,7 @@ class CallsignScanner:
             log.info("Whisper re-attach failed — retrying in %.0fs", backoff)
             if not self._sleep(backoff):
                 return False
-            backoff = min(backoff * 2, 30.0)
+            backoff = min(backoff * 2, 10.0)
         return False
 
     # -- Main loop ----------------------------------------------------------
@@ -652,6 +674,39 @@ class CallsignScanner:
             self.stats["dwells"], len(self.confirmed), self.stats["candidates"],
             self.stats["validated"], self.stats["rejected"], self.stats["segments"],
         )
+
+    def _watchdog_loop(self) -> None:
+        """
+        Force a Whisper re-attach if nothing — not even an in-progress
+        partial segment — has arrived in WHISPER_STALL_TIMEOUT seconds.
+
+        _on_session_error only fires when the server actively reports a
+        problem (a closed socket, an extension error frame); a Whisper
+        connection that quietly stops producing output without ever erroring
+        or closing anything slips past that entirely and would otherwise
+        stay silent for the rest of the run. This is the time-based
+        backstop for that case, reusing the exact same recovery path
+        _on_session_error uses for a reported "whisper extension error" —
+        see _reattach_whisper().
+
+        Dead air on a genuinely quiet frequency can also trip this, but a
+        re-attach only costs the same ~1s interruption it always costs, so a
+        false positive here is cheap compared to a truly stuck connection
+        never being noticed.
+        """
+        while self._running:
+            if not self._sleep(3.0):
+                break
+            if self._session_dead.is_set() or self._whisper_dead.is_set():
+                # Already being handled by run()'s own recovery loop.
+                continue
+            idle = time.time() - self._last_segment_at
+            if idle > WHISPER_STALL_TIMEOUT:
+                log.warning(
+                    "No transcript activity in %.0fs — forcing Whisper re-attach",
+                    idle,
+                )
+                self._whisper_dead.set()
 
     def _web_stats_loop(self) -> None:
         """Push stats + the band/freq activity table to the dashboard every
@@ -842,6 +897,7 @@ class CallsignScanner:
             except queue.Empty:
                 continue
 
+            self._last_segment_at = time.time()
             self.shared.bump("segments")
             marker = "✓" if segment.completed else "…"
             if self.args.verbose:
