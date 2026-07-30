@@ -236,8 +236,8 @@
   // a panel missing from this list still collapses on click, it just opens
   // again after a reload.
   function restoreStaticPanels() {
-    for (const id of ["map-panel", "chart-panel", "confirmed-panel",
-                      "spots-panel", "targets-panel"]) {
+    for (const id of ["map-panel", "chart-panel", "top-panel",
+                      "confirmed-panel", "spots-panel", "targets-panel"]) {
       restoreCollapsed(document.getElementById(id));
     }
   }
@@ -950,10 +950,104 @@
     }
   }
 
+  // Top callsigns across every frequency, confirmed hits against submissions.
+  // Blue/gold rather than band colours: a station heard on two bands has no
+  // single band colour, and these match the map's own confirmed/spotted pair.
+  let topChart = null;
+
+  function buildTopChart(rows) {
+    const canvas = document.getElementById("top-chart");
+    if (!canvas || typeof Chart === "undefined") return;
+    rows = rows || [];
+
+    const labels = rows.map((r) => r.callsign);
+    const datasets = [
+      {
+        label: "confirmed hits",
+        data: rows.map((r) => r.confirmed),
+        backgroundColor: "rgba(88, 166, 255, 0.55)",
+        borderColor: "#58a6ff",
+        borderWidth: 1,
+      },
+      {
+        label: "DX submitted",
+        data: rows.map((r) => r.spotted),
+        backgroundColor: "rgba(227, 179, 65, 0.75)",
+        borderColor: "#e3b341",
+        borderWidth: 1,
+      },
+    ];
+
+    if (topChart) {
+      topChart.data.labels = labels;
+      topChart.data.datasets[0].data = datasets[0].data;
+      topChart.data.datasets[1].data = datasets[1].data;
+      topChart._rows = rows;
+      topChart.update("none");
+    } else {
+      topChart = new Chart(canvas, {
+        type: "bar",
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          interaction: { mode: "index", intersect: false },
+          scales: {
+            // Not stacked: the two bars sit side by side so the gap between
+            // heard and submitted is readable. Stacking would add them, which
+            // means nothing — a submission is a subset of the hits.
+            x: { grid: { display: false },
+                 ticks: { color: "#8b949e", font: { size: 9 }, maxRotation: 0 } },
+            y: { beginAtZero: true,
+                 grid: { color: "#21262d" },
+                 ticks: { color: "#8b949e", font: { size: 9 }, precision: 0 } },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: "#0d1117",
+              borderColor: "#30363d",
+              borderWidth: 1,
+              titleColor: "#c9d1d9",
+              bodyColor: "#c9d1d9",
+              padding: 8,
+              callbacks: {
+                title: (items) => {
+                  const r = (topChart && topChart._rows || rows)[items[0].dataIndex];
+                  if (!r) return items[0].label;
+                  const who = [r.country].filter(Boolean).join("");
+                  return r.callsign + (who ? ` — ${who}` : "");
+                },
+                label: (item) => `${item.dataset.label}: ${item.parsed.y}`,
+                footer: (items) => {
+                  const r = (topChart && topChart._rows || rows)[items[0].dataIndex];
+                  return r && r.bands.length ? "bands: " + r.bands.join(", ") : "";
+                },
+              },
+            },
+          },
+        },
+      });
+      topChart._rows = rows;
+    }
+
+    const note = document.getElementById("top-note");
+    if (note) {
+      note.textContent = rows.length
+        ? "hits are every validated decode, summed across all frequencies"
+        : "no callsigns confirmed yet";
+    }
+  }
+
   function loadChart() {
     fetch("api/history")
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d) buildChart(d); })
+      .then((d) => {
+        if (!d) return;
+        buildChart(d);
+        buildTopChart(d.top_callsigns);
+      })
       .catch(() => {});   // the rest of the dashboard is fine without it
   }
 

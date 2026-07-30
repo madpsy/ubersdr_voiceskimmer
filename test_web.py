@@ -439,6 +439,75 @@ class TestHistory(unittest.TestCase):
             )
 
 
+class TestTopCallsigns(unittest.TestCase):
+    """
+    Backs the top-callsigns chart: busiest stations across every frequency,
+    confirmed hits against submissions.
+    """
+
+    def setUp(self):
+        self.ui = WebUI(workers=1)
+
+    def _hear(self, call, band, hz, times=1, cc="GB", country="England"):
+        for _ in range(times):
+            self.ui.push_confirmed({
+                "normalised": call, "band": band, "frequency": hz, "mode": "usb",
+                "country_code": cc, "country": country, "timestamp": time.time(),
+            }, False, hz)
+
+    def test_hits_sum_across_frequencies(self):
+        # "any frequency" — a station on two bands is two confirmed rows but
+        # one bar here.
+        self._hear("G0VIM", "20m", 14226000, 4)
+        self._hear("G0VIM", "40m", 7155000, 3)
+        rows = self.ui.top_callsigns()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["callsign"], "G0VIM")
+        self.assertEqual(rows[0]["confirmed"], 7)
+        self.assertEqual(rows[0]["bands"], ["20m", "40m"])
+
+    def test_submissions_are_counted_not_just_flagged(self):
+        # _confirmed only records the LAST spot time, so a count needs its own
+        # accumulator — this is what would silently read 1 without it.
+        self._hear("G0VIM", "20m", 14226000, 2)
+        self.ui.push_spot("G0VIM", 14226000, "c", 14226000, "20m", "GB", "England", "usb")
+        self.ui.push_spot("G0VIM", 14226000, "c", 14226000, "20m", "GB", "England", "usb")
+        self.ui.push_spot("G0VIM", 7155000, "c", 7155000, "40m", "GB", "England", "lsb")
+        self.assertEqual(self.ui.top_callsigns()[0]["spotted"], 3)
+
+    def test_never_spotted_reads_zero(self):
+        self._hear("DL2BHM", "20m", 14188000, 5, cc="DE", country="Germany")
+        rows = self.ui.top_callsigns()
+        self.assertEqual(rows[0]["spotted"], 0)
+        self.assertEqual(rows[0]["country_code"], "DE")
+
+    def test_ordered_by_hits_then_callsign(self):
+        self._hear("AAA", "20m", 14200000, 3)
+        self._hear("BBB", "20m", 14210000, 9)
+        self._hear("CCC", "20m", 14220000, 3)
+        rows = self.ui.top_callsigns()
+        self.assertEqual([r["callsign"] for r in rows], ["BBB", "AAA", "CCC"])
+
+    def test_limited_to_ten_by_default(self):
+        for i in range(25):
+            self._hear("C%02d" % i, "20m", 14000000 + i * 5000, i + 1)
+        rows = self.ui.top_callsigns()
+        self.assertEqual(len(rows), 10)
+        # The ten busiest, not the first ten seen.
+        self.assertEqual(rows[0]["callsign"], "C24")
+        self.assertEqual(rows[-1]["callsign"], "C15")
+
+    def test_empty_when_nothing_confirmed(self):
+        self.assertEqual(self.ui.top_callsigns(), [])
+
+    def test_served_with_the_history_payload(self):
+        # One poll draws both charts.
+        self._hear("G0VIM", "20m", 14226000, 2)
+        body = self.ui.app.test_client().get("/api/history").get_json()
+        self.assertIn("top_callsigns", body)
+        self.assertEqual(body["top_callsigns"][0]["callsign"], "G0VIM")
+
+
 class TestCountryCode(unittest.TestCase):
     """
     The dashboard's flags key on the ISO code from the lookup response's CTY

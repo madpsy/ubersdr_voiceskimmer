@@ -142,6 +142,7 @@ const ID_LIST = [
   "explain-body", "explain-close", "confirmed-filter", "spots-filter",
   "map", "map-note", "layer-confirmed", "layer-spotted",
   "confirmed-stop", "spots-stop", "targets-stop",
+  "top-chart", "top-note",
 ];
 for (const id of ID_LIST) byId[id] = new El("div");
 byId["layer-confirmed"].checked = true;
@@ -256,7 +257,7 @@ const HOOK =
   "\n  globalThis.__test = { applyState, renderConfirmedRow, renderSpotRow," +
   " renderTargets, appendTranscript, setLiveTranscript, redrawConfirmed," +
   " redrawSpots, bandClass, mapStations, tooltipHTML, countryFlag," +
-  " flagHTML, panels, els, startRowAudio, stopRowAudio, buildChart, bandColour, bandClass };\n})();\n";
+  " flagHTML, panels, els, startRowAudio, stopRowAudio, buildChart, buildTopChart, bandColour, bandClass };\n})();\n";
 const patched = src.replace(/\n\}\)\(\);\s*$/, HOOK);
 assert.notStrictEqual(patched, src, "could not find the IIFE close in app.js");
 
@@ -334,6 +335,42 @@ check("chart colours come from the table palette", () => {
     assert.strictEqual(T.bandColour(band).toLowerCase(), declared[idx],
                        `${band} colour differs from the stylesheet`);
   }
+});
+
+check("top callsigns chart has two bars per callsign", () => {
+  const rows = [
+    { callsign: "G0VIM", confirmed: 7, spotted: 2, bands: ["20m", "40m"],
+      country: "England", country_code: "GB" },
+    { callsign: "DL2BHM", confirmed: 5, spotted: 0, bands: ["20m"],
+      country: "Germany", country_code: "DE" },
+  ];
+  const before = global.__charts.length;
+  T.buildTopChart(rows);
+  assert.strictEqual(global.__charts.length, before + 1, "no chart created");
+  const c = global.__charts[global.__charts.length - 1];
+  assert.deepStrictEqual(c.data.labels, ["G0VIM", "DL2BHM"]);
+  assert.strictEqual(c.data.datasets.length, 2, "expected confirmed + submitted");
+  assert.deepStrictEqual(c.data.datasets[0].data, [7, 5]);
+  assert.deepStrictEqual(c.data.datasets[1].data, [2, 0]);
+  // Side by side, not stacked: a submission is a subset of the hits, so
+  // adding them would mean nothing.
+  assert.notStrictEqual(c.options.scales.y.stacked, true);
+  assert.notStrictEqual(c.options.scales.x.stacked, true);
+});
+
+check("top chart refreshes in place", () => {
+  const before = global.__charts.length;
+  const updates = global.__charts[before - 1].updates;
+  T.buildTopChart([{ callsign: "W1AW", confirmed: 2, spotted: 1, bands: ["20m"],
+                     country: "United States", country_code: "US" }]);
+  assert.strictEqual(global.__charts.length, before, "rebuilt the chart");
+  assert.strictEqual(global.__charts[before - 1].updates, updates + 1);
+  assert.deepStrictEqual(global.__charts[before - 1].data.labels, ["W1AW"]);
+});
+
+check("top chart survives an empty list", () => {
+  T.buildTopChart([]);
+  T.buildTopChart(undefined);
 });
 
 check("a second refresh updates in place, not a new chart", () => {
