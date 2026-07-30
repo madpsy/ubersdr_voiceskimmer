@@ -30,7 +30,7 @@ services:
       # PARALLEL: "1"
       #
       # Restrict to one or more bands, comma-separated (default: all bands)
-      # BAND: "20m,40m"
+      BAND: "15m,20m,40m,80m"
       #
       # Dwell tuning. All values below are SECONDS.
       #
