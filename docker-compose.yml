@@ -126,7 +126,7 @@ services:
       #
       # Extraction and lookup
       # MIN_EXTRACT_CONFIDENCE: "0.4"     # raise for precision, lower for recall
-      # MIN_CALLSIGN_LENGTH: "4"          # gates the QRZ lookup, not just spotting
+      MIN_CALLSIGN_LENGTH: "5"          # gates the QRZ lookup, not just spotting
       #
       # Set to 6 if this instance is NOT on a bypassed IP — the default lookup
       # limit is 10/minute and you will otherwise see 429s and unvalidated
