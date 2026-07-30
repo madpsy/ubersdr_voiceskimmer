@@ -226,6 +226,11 @@ class CallsignScanner:
         self._web_stats_thread: Optional[threading.Thread] = None
         self._extend_lock = threading.Lock()
         self._extend_until = 0.0
+        # Set by _on_session_error when a socket drops unexpectedly (not a
+        # deliberate stop). run() notices it between dwells and rebuilds the
+        # session with backoff via _reconnect(); _dwell's wait loop also
+        # checks it so a mid-dwell drop doesn't sit out the rest of the dwell.
+        self._session_dead = threading.Event()
         # Set by _segment_worker the instant a VALIDATED callsign is heard on
         # the frequency we are currently dwelling on; _dwell's wait loop polls
         # this and exits immediately rather than lingering.
@@ -423,9 +428,82 @@ class CallsignScanner:
     def _on_session_error(self, message: str) -> None:
         if self.web:
             self.web.set_worker_status(self.worker_id, False, message[:120])
-        if "kicked" in message.lower() or "audio session" in message.lower():
+        lowered = message.lower()
+        if "closed unexpectedly" in lowered:
+            # A dropped socket (e.g. the UberSDR instance restarting), not a
+            # deliberate kick or rejection — worth reconnecting rather than
+            # giving up. See _reconnect().
+            log.warning("Session lost: %s", message)
+            self._session_dead.set()
+        elif "kicked" in lowered or "audio session" in lowered:
             log.error("Session lost: %s", message)
             self._running = False
+
+    def _reconnect(self) -> bool:
+        """
+        Rebuild the session from scratch after an unexpected socket close.
+
+        Neither websocket reconnects on its own, and the server that dropped
+        us — typically mid-restart — needs a moment before it will accept a
+        new session, so this backs off the same way
+        ActivityTracker._sse_loop does for the voice-activity feed: starting
+        at 2s, doubling, capped at 30s, retried forever while the worker is
+        still running.
+
+        A fresh UberSDRSession means a fresh user_session_id, so the
+        validator and the dashboard's audio relay are repointed at it too.
+        """
+        backoff = 2.0
+        while self._running:
+            log.warning("Reconnecting to %s:%d...", self.args.host, self.args.port)
+            if self.web:
+                self.web.set_worker_status(self.worker_id, False, "reconnecting")
+
+            new_session = UberSDRSession(
+                host=self.args.host,
+                port=self.args.port,
+                use_ssl=self.args.ssl,
+                password=self.args.password,
+                frequency=self.session.frequency if self.session else 14200000,
+                mode=self.session.mode if self.session else "usb",
+                on_segment=self.segments.put,
+                on_error=self._on_session_error,
+                on_signal=self._on_signal,
+            )
+
+            attach_kwargs = {}
+            if not self.args.stock_whisper:
+                attach_kwargs = {
+                    "initial_prompt": self.args.prompt,
+                    "task": "transcribe",
+                    "asr_language": self.args.asr_language,
+                }
+
+            if new_session.start() and new_session.attach_whisper(**attach_kwargs):
+                old_session = self.session
+                self.session = new_session
+                self.validator.set_session_uuid(new_session.user_session_id)
+                if self.web:
+                    self.web.audio[self.worker_id].attach(new_session, self.base_url)
+                    self.web.set_worker_status(self.worker_id, True, "transcribing")
+                self._session_dead.clear()
+                if old_session is not None:
+                    old_session.stop()
+                log.info(
+                    "Session reconnected: %s @ %.3f MHz (uuid %s)",
+                    new_session.mode, new_session.frequency / 1e6,
+                    new_session.user_session_id,
+                )
+                return True
+
+            new_session.stop()
+            if not self._running:
+                return False
+            log.info("Reconnect failed — retrying in %.0fs", backoff)
+            if not self._sleep(backoff):
+                return False
+            backoff = min(backoff * 2, 30.0)
+        return False
 
     # -- Main loop ----------------------------------------------------------
 
@@ -434,6 +512,11 @@ class CallsignScanner:
         last_progress = time.time()
 
         while self._running:
+            if self._session_dead.is_set():
+                if not self._reconnect():
+                    break
+                continue
+
             if self.locked_target is not None:
                 target = self.locked_target
             else:
@@ -593,6 +676,10 @@ class CallsignScanner:
 
         exit_reason = "timeout"
         while self._running:
+            if self._session_dead.is_set():
+                exit_reason = "disconnected"
+                break
+
             if not locked and self._success_event.is_set():
                 exit_reason = "confirmed"
                 break
@@ -627,6 +714,8 @@ class CallsignScanner:
             pass  # continuous listening — nothing to report about "moving on"
         elif exit_reason == "confirmed":
             log.info("   ✓ callsign confirmed here — moving on (%.0fs)", held)
+        elif exit_reason == "disconnected":
+            log.info("   (session dropped after %.0fs — reconnecting)", held)
         elif exit_reason == "silence":
             with self._silence_lock:
                 words = self._heard_words

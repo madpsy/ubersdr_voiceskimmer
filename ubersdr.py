@@ -234,7 +234,7 @@ class UberSDRSession:
             on_open=self._on_dx_open,
             on_message=self._on_dx_message,
             on_error=lambda ws, err: log.debug("DX WS error: %s", err),
-            on_close=lambda ws, code, msg: log.info("DX WS closed (%s)", code),
+            on_close=self._on_dx_close,
         )
         self._dx_thread = threading.Thread(
             target=self._dx_ws.run_forever,
@@ -268,6 +268,23 @@ class UberSDRSession:
                     ws.close()
                 except Exception:
                     pass
+
+    def _fail_unexpected_close(self, message: str) -> None:
+        """
+        Neither socket reconnects on its own, and nothing else here notices a
+        dead connection — without this, a dropped socket (e.g. the UberSDR
+        instance restarting) left tune()/send() failing silently ever after,
+        spamming "Connection is already closed" on every dwell forever. This
+        session is done either way; on_error tells the caller, which decides
+        whether to rebuild a new one (see CallsignScanner._reconnect) or give
+        up. self._running already being False means this close came from our
+        own stop(), not a drop, so it's a no-op.
+        """
+        if not self._running:
+            return
+        self._running = False
+        if self.on_error:
+            self.on_error(message)
 
     # -- Audio socket -------------------------------------------------------
 
@@ -353,6 +370,7 @@ class UberSDRSession:
     def _on_audio_close(self, ws, code, msg) -> None:
         log.info("Audio WS closed (%s)", code)
         self._audio_ready.clear()
+        self._fail_unexpected_close("audio session closed unexpectedly (%s)" % (code,))
 
     def _send_audio(self, payload: dict) -> None:
         with self._lock:
@@ -368,6 +386,14 @@ class UberSDRSession:
     def _on_dx_open(self, ws) -> None:
         log.info("DX cluster socket open")
         self._dx_ready.set()
+
+    def _on_dx_close(self, ws, code, msg) -> None:
+        log.info("DX WS closed (%s)", code)
+        self._dx_ready.clear()
+        # Whisper segments arrive over this socket (_handle_binary), so
+        # losing it silently ends transcription even while the audio socket
+        # looks fine. Treat it the same as losing the audio socket.
+        self._fail_unexpected_close("DX cluster session closed unexpectedly (%s)" % (code,))
 
     def _on_dx_message(self, ws, message) -> None:
         if isinstance(message, bytes):
