@@ -7,9 +7,11 @@
 #   UBERSDR_SSL           Set to 1 to use https/wss
 #   UBERSDR_PASS          Bypass password, if the instance needs one
 #   PARALLEL              Scanning sessions to run at once      (default: 1)
-#                         Each holds a Whisper slot for the whole run, and the
-#                         server's whisper.max_users defaults to 2 — so 2 here
-#                         uses every slot and leaves none for web UI users.
+#                         UberSDR 0.1.59+ trusts the "voiceskimmer" container,
+#                         so these sessions are exempt from whisper.max_users.
+#                         Against an older server each holds a slot, and
+#                         max_users defaults to 2 — so 2 here uses every slot
+#                         and leaves none for web UI users.
 #   BAND                  Comma-separated band list             e.g. 20m,40m
 #                         (default: all bands)
 #   DWELL                 Seconds per frequency                 (default: 30)
@@ -37,8 +39,9 @@
 #   LOCK_MODE             Mode for LOCK_FREQ                     (default: usb)
 #   PROMPT                Custom Whisper initial prompt
 #   ASR_LANGUAGE          Whisper recognition language           (default: en)
-#   STOCK_WHISPER         Set to 1 to skip per-attach Whisper params
-#                         (required if the server lacks whisper.allow_client_params)
+#   STOCK_WHISPER         Set to 1 to skip per-attach Whisper params (only
+#                         needed on an UberSDR older than 0.1.59 that also
+#                         lacks whisper.allow_client_params)
 #   SPOT                  Set to 1 to submit DX spots for confirmed callsigns
 #   SPOTTER_CALL          Callsign to log in to the DX cluster with (required with SPOT)
 #   SPOTTER_PASS          DX cluster spot password                (required with SPOT)

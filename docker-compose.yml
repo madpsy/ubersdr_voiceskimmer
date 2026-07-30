@@ -13,10 +13,20 @@ services:
       # UBERSDR_PASS: ""
       #
       # Scanning sessions to run at once, each on its own frequency (default 1).
-      # Every session holds a Whisper slot for as long as it runs, and the
-      # server's whisper.max_users defaults to 2 — so setting this to 2 uses
-      # every slot and leaves none for web UI users. Raise whisper.max_users
-      # on the server before going above 1.
+      #
+      # UberSDR 0.1.59+ lists "voiceskimmer" in whisper.trusted_containers by
+      # default, so this container's sessions are exempt from whisper.max_users
+      # — they neither consume a slot nor get refused when the slots are full.
+      # Keep container_name above as "voiceskimmer" (or add whatever you rename
+      # it to on the server) or the exemption does not apply.
+      #
+      # That is a limit on the UberSDR session count, not on the WhisperLive
+      # server behind it: every parallel session is still a concurrent
+      # transcription, so raise this only as far as that box can keep up.
+      #
+      # Against an older UberSDR, or one with whisper.trusted_containers: [],
+      # every session holds a slot and max_users defaults to 2 — so 2 here uses
+      # every slot and leaves none for web UI users.
       # PARALLEL: "1"
       #
       # Restrict to one or more bands, comma-separated (default: all bands)
@@ -132,7 +142,10 @@ services:
       # Whisper recognition tuning
       # PROMPT: ""
       # ASR_LANGUAGE: "en"
-      # STOCK_WHISPER: "1"   # required if the server lacks whisper.allow_client_params
+      # STOCK_WHISPER: "1"   # only needed on an UberSDR older than 0.1.59 that
+      #                      # also lacks whisper.allow_client_params — as the
+      #                      # trusted "voiceskimmer" container these params are
+      #                      # accepted whatever allow_client_params says
       #
       # DX cluster spot submission — off by default. Spots are immediately
       # visible to every connected DX cluster client.

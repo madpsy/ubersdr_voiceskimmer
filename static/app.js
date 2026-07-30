@@ -335,8 +335,9 @@
 
   // Green once Whisper is attached and transcribing, red when the attach
   // failed or the session dropped, grey while still coming up. The failure is
-  // otherwise silent — whisper.max_users defaults to 2 on the server, so a
-  // second worker is routinely refused while the first runs on happily.
+  // otherwise silent — on a server that does not trust this client as a
+  // container, whisper.max_users defaults to 2, so a second worker is
+  // routinely refused while the first runs on happily.
   function renderStatus(st) {
     const p = panelFor(st);
     if (!p || !st) return;

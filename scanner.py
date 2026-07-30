@@ -341,14 +341,17 @@ class CallsignScanner:
                 self.web.set_worker_status(
                     self.worker_id, False,
                     "Whisper attach failed — the server may be at "
-                    "whisper.max_users",
+                    "whisper.max_users, or rejecting the recognition "
+                    "parameters",
                 )
             if attach_kwargs:
                 log.error(
                     "Whisper attach failed. If the server reported that per-attach "
-                    "recognition parameters are disabled, set "
-                    "whisper.allow_client_params: true in config.yaml, or rerun "
-                    "with --stock-whisper."
+                    "recognition parameters are disabled, it is not treating this "
+                    "client as a trusted container — run as the 'voiceskimmer' "
+                    "container on the server's own Docker network (UberSDR "
+                    "0.1.59+), set whisper.allow_client_params: true in "
+                    "config.yaml, or rerun with --stock-whisper."
                 )
             else:
                 log.error("Whisper attach failed (is whisper.enabled set?)")
@@ -1225,11 +1228,14 @@ def parse_args(argv=None):
                            "stays in rotation and is retried on the next sweep.")
     scan.add_argument("--parallel", type=int, default=1,
                       help="Number of scanning sessions to run at once, each "
-                           "on its own frequency. Every one holds a Whisper "
-                           "slot for the whole run, and whisper.max_users "
-                           "defaults to 2 on the server — so 2 here consumes "
+                           "on its own frequency. Running as the trusted "
+                           "'voiceskimmer' container against UberSDR 0.1.59+, "
+                           "these sessions are exempt from whisper.max_users; "
+                           "otherwise every one holds a slot and max_users "
+                           "defaults to 2 on the server, so 2 here consumes "
                            "every slot and leaves none for web UI users. "
-                           "Raise whisper.max_users before going above 1. "
+                           "Either way each session is a concurrent "
+                           "transcription on the WhisperLive server. "
                            "Ignored with --lock-freq, which pins a single "
                            "frequency.")
     scan.add_argument("--silence-min-snr", type=float, default=40.0,
@@ -1310,8 +1316,10 @@ def parse_args(argv=None):
                               "them rather than the current one.")
     whisper.add_argument("--stock-whisper", action="store_true",
                          help="Do not send per-attach recognition parameters. "
-                              "Required against a server without "
-                              "whisper.allow_client_params enabled.")
+                              "Needed only against a server that rejects them: "
+                              "one older than UberSDR 0.1.59, or not reached as "
+                              "a container in whisper.trusted_containers, and "
+                              "without whisper.allow_client_params enabled.")
 
     dx = parser.add_argument_group("dx cluster")
     dx.add_argument("--spot", action="store_true",

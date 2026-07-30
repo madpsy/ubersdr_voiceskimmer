@@ -1074,8 +1074,9 @@ class WebUI:
         """
         Whether this worker is attached to Whisper and transcribing.
 
-        Worth surfacing because the failure is silent otherwise: whisper
-        max_users defaults to 2 on the server, so a second worker is routinely
+        Worth surfacing because the failure is silent otherwise: against a
+        server that does not treat this client as a trusted container,
+        whisper.max_users defaults to 2, so a second worker is routinely
         refused with "maximum users reached" while the first carries on
         happily. Without this the dashboard just shows an empty panel with no
         indication of why.

@@ -139,11 +139,16 @@ def run_preflight(base_url: str, password: str = "") -> Tuple[bool, List[str]]:
         lines.append(f"{WARN}  CTY unreachable — every candidate will go to QRZ")
 
     # -- Per-attach recognition parameters ---------------------------------
-    # There is no flag for this in /api/description, so infer from version and
-    # let the attach itself be the real test.
+    # Neither whisper.allow_client_params nor whisper.trusted_containers is
+    # exposed in /api/description, and whether *this* client counts as a trusted
+    # container depends on the server's view of its source IP — which it cannot
+    # see from here. So say what to expect and let the attach be the real test.
     lines.append(
-        f"{WARN}  Cannot detect whisper.allow_client_params remotely. If the "
-        "attach is rejected, rerun with --stock-whisper."
+        f"{WARN}  Cannot detect the whisper parameter policy remotely. Run as "
+        "the 'voiceskimmer' container on this server's Docker network "
+        "(UberSDR 0.1.59+) and the parameters are accepted; otherwise the "
+        "server needs whisper.allow_client_params, or rerun with "
+        "--stock-whisper."
     )
 
     if suggested:

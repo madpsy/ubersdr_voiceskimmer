@@ -62,7 +62,7 @@ Pre-flight: http://44.31.241.7:8080
   OK    10 voice signals active across 3 band(s)
   OK    Bypassed IP — no lookup rate limit, no session time cap
   OK    CTY available — free unallocated-prefix filter active
-  WARN  Cannot detect whisper.allow_client_params remotely...
+  WARN  Cannot detect the whisper parameter policy remotely...
 
 Ready to scan.
 ```
@@ -77,7 +77,7 @@ still let a scan run, and the output tells you which flags to add.
 | `whisper.enabled: true` | Transcription at all. Also needs a reachable `whisper.server_url` |
 | `lookup_services.enabled: true` | QRZ validation — without it there is nothing to check against |
 | `noisefloor.enabled: true` | Voice activity detection, i.e. somewhere to hop |
-| `whisper.allow_client_params: true` | The tuned recognition parameters. Optional — see below |
+| `whisper.allow_client_params: true` | The tuned recognition parameters. Not needed when the server trusts this container — see [Trusted container](#trusted-container) |
 | The `dxcluster` addon installed | Submitting DX spots. Only needed with `--spot`; the scan itself runs without it |
 
 ## 3. Run it
@@ -147,11 +147,32 @@ see nothing while it runs. Use `tee` if you want a copy:
 .venv/bin/python scanner.py --host 44.31.241.7 --verbose 2>&1 | tee run.log
 ```
 
+### Trusted container
+
+UberSDR 0.1.59 added `whisper.trusted_containers`, which lists `voiceskimmer` by
+default. When the scanner runs as that container on the server's own Docker
+network — the [compose deployment](#8-docker--deployment) — the server
+recognises it and:
+
+* accepts the recognition parameters whatever `whisper.allow_client_params` is
+  set to, so no server change is needed for the tuned path;
+* exempts its sessions from `whisper.max_users`, so they neither consume a slot
+  nor get turned away when web UI users have taken them all.
+
+Trust is decided on the **raw TCP peer IP** of the audio WebSocket, matched
+against the container name via Docker DNS. So it applies only to a direct
+connection on the internal network: running from source, from another host, or
+through Caddy is an ordinary client, however the container is named. If you
+rename the container, add the new name to `whisper.trusted_containers` on the
+server. It grants nothing beyond those two whisper privileges.
+
 ### If the attach is rejected
 
-`whisper.allow_client_params` defaults to `false`, and there is no way to detect
-it remotely. If the attach fails with a message about per-attach recognition
-parameters being disabled, either set it on the server or run:
+Against anything else — an UberSDR older than 0.1.59, `trusted_containers: []`,
+or a scanner not running as that container — `whisper.allow_client_params`
+governs, and it defaults to `false`. There is no way to detect it remotely. If
+the attach fails with a message about per-attach recognition parameters being
+disabled, either set it on the server or run:
 
 ```bash
 .venv/bin/python scanner.py --host <host> --stock-whisper
@@ -210,7 +231,7 @@ exact frequency, so on a quiet instance expect zeroes.
 | Flag | Default | Why change it |
 |---|---|---|
 | `--band 20m,40m` | all | Restrict to one or more bands (comma-separated) |
-| `--parallel` | 1 | Scanning sessions to run at once, each on its own frequency. Every one holds a Whisper slot, and the server's `whisper.max_users` defaults to **2** — so 2 here uses every slot and leaves none for web UI users |
+| `--parallel` | 1 | Scanning sessions to run at once, each on its own frequency. As a [trusted container](#trusted-container) these are exempt from `whisper.max_users`; otherwise every one holds a slot and the default is **2**, so 2 here uses every slot and leaves none for web UI users. Either way each session is a concurrent transcription on the WhisperLive server |
 | `--dwell` | 30 s | Base listen time per frequency (~2 VAD segments) |
 | `--max-dwell` | 60 s | Ceiling, so a busy net cannot hold the scanner. The default allows `--dwell` plus one `--dwell-extension` |
 | `--silence-timeout` | 10 s | Move on early if nothing is heard at all — dead air, not a real dwell |
@@ -469,7 +490,7 @@ out in `docker-compose.yml` — an unset variable means the flag is not passed a
 
 | Variable | CLI flag | Default | Notes |
 |---|---|---|---|
-| `STOCK_WHISPER` | `--stock-whisper` | off | set to `1` to send no recognition parameters |
+| `STOCK_WHISPER` | `--stock-whisper` | off | set to `1` to send no recognition parameters — only needed against a server that rejects them, see [Trusted container](#trusted-container) |
 | `ASR_LANGUAGE` | `--asr-language` | `en` |  |
 | `PROMPT` | `--prompt` | built-in phonetics prompt | custom Whisper initial prompt |
 
@@ -533,9 +554,11 @@ because it has no recorded User-Agent (`websocket.go:563`). Check the
 `/connection` call and the WebSocket. Common behind round-robin proxies or VPNs.
 
 **Whisper attaches but no segments ever arrive**
-Check the server can reach its WhisperLive (`whisper.server_url`), and that
-`whisper.max_users` is not already exhausted — the scanner holds one slot for
-its whole run.
+Check the server can reach its WhisperLive (`whisper.server_url`). If the attach
+itself is refused with "maximum users reached", `whisper.max_users` is
+exhausted — which only applies when the server is not treating this client as a
+[trusted container](#trusted-container), in which case the scanner holds a slot
+for its whole run.
 
 **"Server does not support reset_transcript"**
 An older server. The scanner degrades automatically and warns once. It keeps
@@ -780,8 +803,10 @@ licensed — a CTY hit proves nothing, only a miss is informative.
 
 ## Known limitations
 
-- One Whisper instance per session, and `whisper.max_users` defaults to 2, so
-  the scanner occupies a slot for its whole run.
+- One Whisper instance per session, held for the whole run. As a
+  [trusted container](#trusted-container) that costs no `whisper.max_users`
+  slot, but it is still a concurrent transcription on the WhisperLive server;
+  elsewhere it occupies one of the two default slots.
 - Scanning is serial. With 20–40 active signals a full cycle takes many minutes,
   and callsigns are given at the start and end of overs, so the hit rate per
   dwell is inherently low. Parallel scanning would need multiple sessions.

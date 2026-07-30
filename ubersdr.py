@@ -485,10 +485,12 @@ class UberSDRSession:
         """
         Attach the Whisper extension.
 
-        initial_prompt / task / asr_language require
-        `whisper.allow_client_params: true` on the server; the attach is
-        rejected outright otherwise, so leave them unset against a stock
-        instance.
+        initial_prompt / task / asr_language require either that the server
+        recognises this client as a trusted container (UberSDR 0.1.59+,
+        `whisper.trusted_containers`, which lists "voiceskimmer" by default) or
+        `whisper.allow_client_params: true`; the attach is rejected outright
+        otherwise, so leave them unset against a stock instance reached from
+        outside its Docker network.
         """
         params: dict = {}
         if initial_prompt is not None:
