@@ -119,6 +119,11 @@ class El {
     this._rows = out; this._rowsFor = this._html;
     return out;
   }
+  contains(node) {
+    if (node === this) return true;
+    for (const c of this.children) if (c.contains && c.contains(node)) return true;
+    return false;
+  }
   closest(sel) {
     const byTag = !sel.startsWith(".");
     const want = sel.replace(/^\./, "");
@@ -181,7 +186,11 @@ global.Audio = class {
     return Promise.resolve();
   }
 };
-global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+// Synchronous on purpose. As setTimeout these never ran: the suite calls
+// process.exit() at the end of the same tick, so every requestAnimationFrame
+// callback in app.js was silently skipped — including the one that scrolls a
+// transcript to the bottom when its panel is expanded.
+global.requestAnimationFrame = (fn) => { fn(); return 0; };
 // The band palette lives in index.html as --band on .band-cN; bandColour
 // resolves it through a probe element rather than duplicating it in JS, so the
 // stub has to answer for that probe.
@@ -545,6 +554,59 @@ check("panels collapse and expand from the title bar", () => {
   assert.ok(sec.classList.contains("collapsed"), "did not collapse");
   global.__fireDocument("click", { target: btn });
   assert.ok(!sec.classList.contains("collapsed"), "did not expand again");
+});
+
+check("expanding a transcript scrolls to the latest", () => {
+  // While collapsed the panel is display:none, so scrollTop/clientHeight/
+  // scrollHeight all read 0 — appendTranscript's "was the reader at the
+  // bottom" check reads true and pins scrollTop to 0. Every line arriving
+  // while hidden therefore left it at the TOP, and expanding showed the
+  // oldest text with the latest off-screen below.
+  const p = T.panels.get(0);
+  assert.ok(p, "panel 0 missing");
+
+  const section = new El("section");
+  section.id = "transcript-panel-0";
+  section.className = "panel transcript-panel";
+  const btn = new El("button");
+  btn.className = "panel-toggle";
+  section.appendChild(btn);
+  section.appendChild(p.scroll);
+  section.querySelector = (sel) => (sel === ".panel-toggle" ? btn : p.scroll);
+
+  // Simulate a transcript that grew while hidden: content taller than the
+  // viewport, scrolled to the top.
+  p.scroll.scrollHeight = 4000;
+  p.scroll.clientHeight = 150;
+  p.scroll.scrollTop = 0;
+
+  global.__fireDocument("click", { target: btn });     // collapse
+  assert.ok(section.classList.contains("collapsed"));
+  assert.strictEqual(p.scroll.scrollTop, 0, "nothing should scroll on collapse");
+
+  global.__fireDocument("click", { target: btn });     // expand
+  assert.ok(!section.classList.contains("collapsed"));
+  assert.strictEqual(p.scroll.scrollTop, 4000,
+                     "expanding did not scroll to the latest line");
+});
+
+check("expanding a table panel does NOT scroll it down", () => {
+  // The tables sort newest-first, so the top already is the latest and
+  // scrolling down would hide it.
+  const section = new El("section");
+  section.id = "confirmed-panel";
+  section.className = "panel";
+  const btn = new El("button");
+  btn.className = "panel-toggle";
+  const scroll = new El("div");
+  scroll.className = "scroll";
+  scroll.scrollHeight = 4000; scroll.clientHeight = 150; scroll.scrollTop = 0;
+  section.appendChild(btn); section.appendChild(scroll);
+  section.querySelector = (sel) => (sel === ".panel-toggle" ? btn : scroll);
+
+  global.__fireDocument("click", { target: btn });   // collapse
+  global.__fireDocument("click", { target: btn });   // expand
+  assert.strictEqual(scroll.scrollTop, 0, "table panel should stay at the top");
 });
 
 check("collapsed panels are remembered", () => {

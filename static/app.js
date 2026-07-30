@@ -214,6 +214,42 @@
     } catch (err) {
       /* not being able to remember is not worth breaking the click over */
     }
+    if (!on) onExpanded(section);
+  }
+
+  // A collapsed panel is display:none, so everything inside it measures zero
+  // while hidden. Anything that reads its own size has to be told once it is
+  // back on screen.
+  //
+  // Deferred to the next frame so the layout has actually been recomputed
+  // rather than measured through the class change.
+  function onExpanded(section) {
+    requestAnimationFrame(() => {
+      // Transcripts: while hidden, scrollTop/clientHeight/scrollHeight are all
+      // 0, so appendTranscript's "was the reader at the bottom" check reads
+      // true and pins scrollTop to 0. Every line that arrived while collapsed
+      // therefore left it at the TOP, and expanding showed the oldest text
+      // with the latest off-screen below.
+      //
+      // Only the transcripts: the tables sort newest-first, so the top is
+      // already the latest there and scrolling them down would hide it.
+      if (section.classList.contains("transcript-panel")) {
+        const scroll = section.querySelector(".scroll");
+        if (scroll) scroll.scrollTop = scroll.scrollHeight;
+      }
+
+      // Leaflet caches the container size it was last laid out at. Sized while
+      // hidden that is 0x0, and it draws into a collapsed corner until told
+      // otherwise.
+      if (map && section.id === "map-panel") map.invalidateSize();
+
+      // Chart.js resizes off a ResizeObserver, which does fire on becoming
+      // visible — but only for a canvas it already knows about, and it costs
+      // nothing to be certain.
+      for (const c of [chart, topChart]) {
+        if (c && section.contains(c.canvas)) c.resize();
+      }
+    });
   }
 
   function restoreCollapsed(section) {
