@@ -148,7 +148,9 @@ byId["layer-confirmed"].checked = true;
 byId["layer-spotted"].checked = true;
 
 const docHandlers = {};
+const documentBody = new El("body");
 global.document = {
+  body: documentBody,
   getElementById: (id) => byId[id] || (byId[id] = new El("div")),
   querySelector: () => new El("tbody"),
   createElement: (t) => new El(t),
@@ -179,6 +181,35 @@ global.Audio = class {
   }
 };
 global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+// The band palette lives in index.html as --band on .band-cN; bandColour
+// resolves it through a probe element rather than duplicating it in JS, so the
+// stub has to answer for that probe.
+const BAND_HEX = ["#58a6ff", "#39c5cf", "#a371f7", "#f778ba",
+                  "#7fb3d5", "#d2a8ff", "#b08968", "#9aa5b1"];
+global.getComputedStyle = (el) => ({
+  getPropertyValue: (prop) => {
+    if (prop !== "--band") return "";
+    for (const c of el._classes) {
+      const m = /^band-c(\d)$/.exec(c);
+      if (m) return BAND_HEX[Number(m[1])];
+    }
+    return "";
+  },
+  display: "block",
+  opacity: "1",
+});
+
+// Chart.js stand-in: records the config so the chart wiring can be asserted
+// without a canvas.
+global.__charts = [];
+global.Chart = class {
+  constructor(canvas, config) {
+    this.canvas = canvas; this.data = config.data; this.options = config.options;
+    this.updates = 0;
+    global.__charts.push(this);
+  }
+  update() { this.updates++; }
+};
 // No network in this test: every fetch never settles, so the page renders
 // from whatever the test feeds it directly.
 global.fetch = () => new Promise(() => {});
@@ -225,7 +256,7 @@ const HOOK =
   "\n  globalThis.__test = { applyState, renderConfirmedRow, renderSpotRow," +
   " renderTargets, appendTranscript, setLiveTranscript, redrawConfirmed," +
   " redrawSpots, bandClass, mapStations, tooltipHTML, countryFlag," +
-  " flagHTML, panels, els, startRowAudio, stopRowAudio };\n})();\n";
+  " flagHTML, panels, els, startRowAudio, stopRowAudio, buildChart, bandColour, bandClass };\n})();\n";
 const patched = src.replace(/\n\}\)\(\);\s*$/, HOOK);
 assert.notStrictEqual(patched, src, "could not find the IIFE close in app.js");
 
@@ -251,6 +282,71 @@ console.log("test_frontend.js");
 
 check("app.js loads without throwing", () => {
   assert.ok(T, "test hook missing");
+});
+
+check("the chart draws 24 hours, zero-filled, stacked by band", () => {
+  // Shaped exactly like /api/history: 24 buckets, most of them empty.
+  const hour = 3600;
+  const first = Math.floor(Date.now() / 1000 / hour) - 23;
+  const buckets = [];
+  for (let i = 0; i < 24; i++) {
+    const b = { start: (first + i) * hour, confirmed: {}, spotted: {} };
+    if (i === 21) { b.confirmed = { "20m": 7, "17m": 2 }; b.spotted = { "20m": 3 }; }
+    if (i === 23) { b.confirmed = { "20m": 5, "40m": 3 }; b.spotted = { "40m": 1 }; }
+    buckets.push(b);
+  }
+  global.__charts.length = 0;
+  T.buildChart({ generated_at: Date.now() / 1000, bucket_seconds: hour,
+                 buckets, bands: ["17m", "20m", "40m"] });
+
+  assert.strictEqual(global.__charts.length, 1, "no chart created");
+  const c = global.__charts[0];
+  assert.strictEqual(c.data.labels.length, 24, "not a full 24-hour axis");
+  // Two datasets per band, in two stacks.
+  assert.strictEqual(c.data.datasets.length, 6);
+  const stacks = new Set(c.data.datasets.map((d) => d.stack));
+  assert.deepStrictEqual([...stacks].sort(), ["confirmed", "spotted"]);
+  // Empty hours are present as zeros rather than absent.
+  const conf20 = c.data.datasets.find((d) => d.label === "20m confirmed");
+  assert.strictEqual(conf20.data.length, 24);
+  assert.strictEqual(conf20.data[0], 0, "empty hour not zero-filled");
+  assert.strictEqual(conf20.data[21], 7);
+  assert.ok(c.options.scales.x.stacked && c.options.scales.y.stacked);
+  assert.strictEqual(c.options.plugins.legend.display, false);
+});
+
+check("chart colours come from the table palette", () => {
+  // Read from the stylesheet, not a second copy in JS — the whole point is
+  // that a band is the same colour in the chart and in the tables.
+  for (const band of ["20m", "40m", "80m"]) {
+    const colour = T.bandColour(band);
+    assert.match(colour, /^#[0-9a-f]{6}$/i, `${band} -> ${colour}`);
+  }
+  assert.notStrictEqual(T.bandColour("20m"), T.bandColour("40m"));
+
+  // And the palette it reads is the one index.html declares.
+  const html = fs.readFileSync(path.join(__dirname, "static", "index.html"), "utf8");
+  const declared = [...html.matchAll(/\.band-c(\d)\s*\{\s*--band:\s*(#[0-9a-f]{6})/gi)]
+    .reduce((acc, m) => (acc[m[1]] = m[2].toLowerCase(), acc), {});
+  assert.strictEqual(Object.keys(declared).length, 8, "expected 8 band colours");
+  for (const band of ["160m", "80m", "20m"]) {
+    const idx = T.bandClass(band).replace("band-c", "");
+    assert.strictEqual(T.bandColour(band).toLowerCase(), declared[idx],
+                       `${band} colour differs from the stylesheet`);
+  }
+});
+
+check("a second refresh updates in place, not a new chart", () => {
+  const hour = 3600;
+  const first = Math.floor(Date.now() / 1000 / hour) - 23;
+  const buckets = Array.from({ length: 24 }, (_, i) => ({
+    start: (first + i) * hour, confirmed: {}, spotted: {},
+  }));
+  const before = global.__charts.length;
+  const updates = global.__charts[0].updates;
+  T.buildChart({ bucket_seconds: hour, buckets, bands: [] });
+  assert.strictEqual(global.__charts.length, before, "rebuilt the chart");
+  assert.strictEqual(global.__charts[0].updates, updates + 1, "did not update");
 });
 
 check("the explain modal stacks above the map", () => {

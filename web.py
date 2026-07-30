@@ -336,6 +336,20 @@ class WebUI:
         # "(repeat)" tracking.
         self._confirmed: Dict[str, Dict[str, Any]] = {}
         self._spots: "deque[Dict[str, Any]]" = deque(maxlen=spots_maxlen)
+        # Rolling per-band activity for the dashboard's 24h chart, keyed
+        # (hour bucket, band) -> {"confirmed": {calls}, "spotted": {calls}}.
+        #
+        # Accumulated here rather than derived from _confirmed, which cannot
+        # answer it: that dict holds ONE timestamp per (callsign, frequency)
+        # and overwrites it on every re-hearing, so a station active for six
+        # hours leaves a single point at the end.
+        #
+        # Distinct callsigns per bucket rather than raw events, for both
+        # series. push_confirmed fires on every validated decode, so counting
+        # events would let one chatty station tower over a band full of
+        # quieter ones; and a re-spot after the cooldown is the same station
+        # again, not a new one. So both series read as "stations active".
+        self._history: Dict[Tuple[int, str], Dict[str, Set[str]]] = {}
         self._targets: List[Dict[str, Any]] = []
         self._stats: Dict[str, Any] = {}
 
@@ -393,6 +407,16 @@ class WebUI:
                 mimetype="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
+
+        @app.route("/api/history")
+        def api_history():
+            """
+            Per-band activity over the last 24 hours, one bucket per hour.
+
+            Serves state already accumulated, so it is not rate limited —
+            same as /api/state.
+            """
+            return jsonify(self.history())
 
         @app.route("/api/spots")
         def api_spots():
@@ -486,6 +510,76 @@ class WebUI:
             )
 
         return app
+
+    # -- Activity history -------------------------------------------------
+
+    HISTORY_BUCKET_SECONDS = 3600
+    HISTORY_BUCKETS = 24
+
+    def _record_history(self, kind: str, band: str, callsign: str) -> None:
+        """Note one station active on a band. Caller holds the lock."""
+        if not band or not callsign:
+            return
+        bucket = int(time.time() // self.HISTORY_BUCKET_SECONDS)
+        entry = self._history.get((bucket, band))
+        if entry is None:
+            entry = {"confirmed": set(), "spotted": set()}
+            self._history[(bucket, band)] = entry
+        entry[kind].add(callsign)
+
+        # Drop anything that has fallen out of the window. Cheap because the
+        # map only ever holds a day's worth of (bucket, band) pairs.
+        oldest = bucket - self.HISTORY_BUCKETS
+        for key in [k for k in self._history if k[0] < oldest]:
+            del self._history[key]
+
+    def history(self) -> Dict[str, Any]:
+        """
+        The last 24 hours of per-band activity, one bucket per hour.
+
+        Always returns exactly HISTORY_BUCKETS buckets ending at the current
+        hour, zero-filled where nothing was heard — the chart shows a full
+        rolling day whether or not the scanner was running for it, so a gap
+        reads as "quiet" rather than as missing axis.
+        """
+        now = time.time()
+        current = int(now // self.HISTORY_BUCKET_SECONDS)
+        first = current - self.HISTORY_BUCKETS + 1
+
+        with self._lock:
+            snapshot = {
+                key: {k: len(v) for k, v in val.items()}
+                for key, val in self._history.items()
+            }
+
+        bands = sorted({band for (bucket, band) in snapshot if bucket >= first})
+        buckets = []
+        for bucket in range(first, current + 1):
+            start = bucket * self.HISTORY_BUCKET_SECONDS
+            confirmed, spotted = {}, {}
+            for band in bands:
+                counts = snapshot.get((bucket, band))
+                if not counts:
+                    continue
+                if counts.get("confirmed"):
+                    confirmed[band] = counts["confirmed"]
+                if counts.get("spotted"):
+                    spotted[band] = counts["spotted"]
+            buckets.append({
+                "start": start,
+                "start_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start)),
+                "confirmed": confirmed,
+                "spotted": spotted,
+            })
+
+        return {
+            "generated_at": now,
+            "bucket_seconds": self.HISTORY_BUCKET_SECONDS,
+            "buckets": buckets,
+            "bands": bands,
+            # Both series count distinct callsigns per bucket — see _history.
+            "counts": "distinct callsigns per bucket",
+        }
 
     # -- Rate limiting ----------------------------------------------------
 
@@ -880,6 +974,7 @@ class WebUI:
             entry["is_repeat"] = is_repeat
             entry["spotted_at"] = existing.get("spotted_at") if existing else None
             self._confirmed[key] = entry
+            self._record_history("confirmed", entry.get("band", ""), call)
         self._broadcast("confirmed", entry)
 
     def push_spot(
@@ -904,6 +999,7 @@ class WebUI:
             self._spots.append(entry)
             if key in self._confirmed:
                 self._confirmed[key]["spotted_at"] = entry["time"]
+            self._record_history("spotted", band, callsign)
         self._broadcast("spot", entry)
 
     def set_worker_status(self, worker: int, connected: bool, detail: str = "") -> None:

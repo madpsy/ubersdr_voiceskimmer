@@ -354,6 +354,91 @@ class TestSpotQuery(unittest.TestCase):
             self.assertIn("error", body)
 
 
+class TestHistory(unittest.TestCase):
+    """
+    Backs the dashboard's rolling 24h chart. The window must always be a full
+    24 buckets — a chart that only draws the hours it has data for would show
+    a busy evening and a quiet one as the same shape.
+    """
+
+    def setUp(self):
+        self.ui = WebUI(workers=1)
+
+    def _seed(self, hours_ago, band, calls, kind="confirmed"):
+        hour = int(time.time() // 3600) - hours_ago
+        entry = self.ui._history.setdefault(
+            (hour, band), {"confirmed": set(), "spotted": set()}
+        )
+        entry[kind].update(calls)
+
+    def test_always_returns_a_full_day(self):
+        h = self.ui.history()
+        self.assertEqual(len(h["buckets"]), 24)
+        self.assertEqual(h["bands"], [])
+        # Empty, not absent.
+        self.assertTrue(all(b["confirmed"] == {} for b in h["buckets"]))
+
+    def test_buckets_are_hourly_and_in_order(self):
+        h = self.ui.history()
+        starts = [b["start"] for b in h["buckets"]]
+        self.assertEqual(starts, sorted(starts))
+        self.assertTrue(all(b - a == 3600 for a, b in zip(starts, starts[1:])))
+        self.assertEqual(h["bucket_seconds"], 3600)
+
+    def test_counts_land_in_the_right_bucket(self):
+        self._seed(0, "20m", ["G0VIM", "DL2BHM"])
+        self._seed(3, "40m", ["EA5XX"])
+        h = self.ui.history()
+        self.assertEqual(h["buckets"][-1]["confirmed"], {"20m": 2})
+        self.assertEqual(h["buckets"][-4]["confirmed"], {"40m": 1})
+        self.assertEqual(h["bands"], ["20m", "40m"])
+
+    def test_distinct_callsigns_not_events(self):
+        # push_confirmed fires on every validated decode; counting events would
+        # let one chatty station tower over a band full of quieter ones.
+        for _ in range(10):
+            self.ui.push_confirmed({
+                "normalised": "G0VIM", "band": "20m", "frequency": 14226000,
+                "mode": "usb", "timestamp": time.time(),
+            }, False, 14226000)
+        h = self.ui.history()
+        self.assertEqual(h["buckets"][-1]["confirmed"], {"20m": 1})
+
+    def test_a_respot_is_the_same_station(self):
+        for _ in range(3):
+            self.ui.push_spot("G0VIM", 14226000, "c", 14226000, "20m", "GB", "X", "usb")
+        h = self.ui.history()
+        self.assertEqual(h["buckets"][-1]["spotted"], {"20m": 1})
+
+    def test_anything_older_than_the_window_is_dropped(self):
+        self._seed(30, "80m", ["OLD"])          # 30h ago
+        self._seed(0, "20m", ["NEW"])           # triggers the prune
+        self.ui.push_confirmed({
+            "normalised": "NEW2", "band": "20m", "frequency": 14226000,
+            "mode": "usb", "timestamp": time.time(),
+        }, False, 14226000)
+        h = self.ui.history()
+        self.assertNotIn("80m", h["bands"])
+        self.assertTrue(all("80m" not in b["confirmed"] for b in h["buckets"]))
+
+    def test_endpoint_serves_it(self):
+        self._seed(0, "20m", ["G0VIM"])
+        r = self.ui.app.test_client().get("/api/history")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertEqual(len(body["buckets"]), 24)
+        self.assertEqual(body["buckets"][-1]["confirmed"], {"20m": 1})
+
+    def test_not_rate_limited(self):
+        # The chart polls it, and it serves state already accumulated.
+        c = self.ui.app.test_client()
+        for _ in range(5):
+            self.assertEqual(
+                c.get("/api/history", headers={"X-Real-IP": "203.0.113.77"}).status_code,
+                200,
+            )
+
+
 class TestCountryCode(unittest.TestCase):
     """
     The dashboard's flags key on the ISO code from the lookup response's CTY

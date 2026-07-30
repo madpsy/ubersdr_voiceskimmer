@@ -81,6 +81,17 @@ to work out why an obvious callsign produced nothing. It is served by
 `POST /api/explain`, which makes no QRZ lookup and is rate limited to one
 request per second per address.
 
+The **activity chart** under the map shows the last 24 hours per band, in the
+same colours as the tables, as two stacks per hour — confirmed and spotted.
+Spotted is necessarily a subset of confirmed, so side-by-side stacks make the
+gap between "heard" and "actually submitted" visible where one combined stack
+would hide it. Both count *distinct callsigns* per hour rather than events: a
+station heard fifty times is one station, and a re-spot after the cooldown is
+the same station again, so the chart reads as "stations active" rather than
+being dominated by whichever operator talked most. The window is rolling and
+always a full 24 hours, so a quiet night reads as quiet rather than as a
+missing axis.
+
 The **map** plots stations against the receiver, using the coordinates QRZ
 returns (falling back to the DXCC entity centre from CTY). Confirmed and
 spotted stations are separate layers, both on by default — a spotted callsign
@@ -316,6 +327,7 @@ durable record. Nothing here is authenticated — see the note on exposure in
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/state` | Full dashboard snapshot (workers, transcript tail, confirmed, spots, targets, stats). |
+| `GET /api/history` | Per-band activity over a rolling 24 hours, one bucket per hour, for the dashboard's chart. Always 24 buckets, zero-filled. Both series count **distinct callsigns** per bucket, not events — see below. |
 | `GET /api/events` | SSE stream of incremental updates. |
 | `POST /api/explain` | Why a transcript line did or did not yield a callsign. Body `{"text": "..."}`. Rate limited 1/s per address. |
 | `GET /api/audio/<worker>` | Live audio from that worker, WebM/Opus. |

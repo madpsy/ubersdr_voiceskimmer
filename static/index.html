@@ -566,6 +566,35 @@
   .tp-head .tp-current .empty { color: var(--dim); }
   .tp-head .tp-signal { margin-left: auto; }
 
+  /* -- Activity chart ----------------------------------------------------- */
+  /* Fixed height, and the canvas is sized by Chart.js inside it. A canvas with
+     no container height and maintainAspectRatio:false grows without bound. */
+  .chart-wrap {
+    position: relative;
+    height: 220px;
+    padding: 8px 10px 4px;
+  }
+  .chart-legend {
+    margin-left: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 10px;
+  }
+  .chart-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--dim);
+  }
+  .chart-legend i {
+    width: 8px; height: 8px;
+    border-radius: 2px;
+    display: inline-block;
+  }
+
   /* -- Map ---------------------------------------------------------------- */
   #map {
     height: 380px;
@@ -659,6 +688,16 @@
       <div id="map"></div>
       <p class="map-note" id="map-note"></p>
     </section>
+
+    <section class="panel" id="chart-panel">
+      <h2 class="with-filter">
+        <button class="panel-toggle" aria-expanded="true" title="Collapse"></button>
+        <span>Activity — last 24 hours</span>
+        <span class="chart-legend" id="chart-legend"></span>
+      </h2>
+      <div class="chart-wrap"><canvas id="activity-chart"></canvas></div>
+      <p class="map-note" id="chart-note"></p>
+    </section>
   </div>
 
   <div id="side">
@@ -733,6 +772,7 @@
      preview itself still needs the dashboard to be same-origin with UberSDR
      (MinimalRadio builds its WebSocket from window.location.host), i.e.
      reached through the addon proxy. -->
+<script src="static/chart.umd.min.js"></script>
 <script src="static/opus-decoder.min.js"></script>
 <script src="static/minimal-radio.js"></script>
 <script src="static/leaflet.js"></script>

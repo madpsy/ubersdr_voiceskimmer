@@ -236,7 +236,8 @@
   // a panel missing from this list still collapses on click, it just opens
   // again after a reload.
   function restoreStaticPanels() {
-    for (const id of ["map-panel", "confirmed-panel", "spots-panel", "targets-panel"]) {
+    for (const id of ["map-panel", "chart-panel", "confirmed-panel",
+                      "spots-panel", "targets-panel"]) {
       restoreCollapsed(document.getElementById(id));
     }
   }
@@ -776,6 +777,196 @@
     if (btn) btn.addEventListener("click", stopRowAudio);
   }
 
+  // -- Activity chart -------------------------------------------------------
+
+  // Distinct stations per band per hour, confirmed and spotted, over a rolling
+  // 24 hours. The server always returns all 24 buckets, zero-filled, so a
+  // quiet night reads as quiet rather than as a missing axis.
+  //
+  // Two stacks per hour — confirmed and spotted — each segmented by band.
+  // Spotted is necessarily a subset of confirmed, so showing them side by side
+  // makes the gap between "heard" and "actually submitted" visible, which one
+  // combined stack would hide.
+
+  let chart = null;
+  let chartRefreshTimer = null;
+
+  // Resolved from the stylesheet rather than duplicated here, so the tables,
+  // the transcript stripes and the chart cannot drift apart. bandClass gives
+  // the class; the class carries --band.
+  const bandColourCache = new Map();
+
+  function bandColour(band) {
+    const cls = bandClass(band);
+    if (!cls) return "#8b949e";
+    if (bandColourCache.has(cls)) return bandColourCache.get(cls);
+    const probe = document.createElement("div");
+    probe.className = cls;
+    probe.style.display = "none";
+    document.body.appendChild(probe);
+    const value = getComputedStyle(probe).getPropertyValue("--band").trim();
+    probe.remove();
+    const colour = value || "#8b949e";
+    bandColourCache.set(cls, colour);
+    return colour;
+  }
+
+  // Chart.js wants rgba for the translucent confirmed bars; --band is hex.
+  function withAlpha(hex, alpha) {
+    const m = /^#([0-9a-f]{6})$/i.exec(hex);
+    if (!m) return hex;
+    const n = parseInt(m[1], 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+  }
+
+  function hourLabel(unixSeconds) {
+    const d = new Date(unixSeconds * 1000);
+    return String(d.getHours()).padStart(2, "0") + ":00";
+  }
+
+  function renderChartLegend(bands) {
+    const el = document.getElementById("chart-legend");
+    if (!el) return;
+    el.innerHTML = bands
+      .map(
+        (b) =>
+          `<span><i style="background:${bandColour(b)}"></i>${esc(b)}</span>`
+      )
+      .join("");
+  }
+
+  function buildChart(data) {
+    const canvas = document.getElementById("activity-chart");
+    if (!canvas || typeof Chart === "undefined") return;
+
+    const buckets = data.buckets || [];
+    const bands = data.bands || [];
+    const labels = buckets.map((b) => hourLabel(b.start));
+
+    const datasets = [];
+    for (const band of bands) {
+      const colour = bandColour(band);
+      datasets.push({
+        label: `${band} confirmed`,
+        data: buckets.map((b) => b.confirmed[band] || 0),
+        backgroundColor: withAlpha(colour, 0.45),
+        borderColor: colour,
+        borderWidth: 1,
+        stack: "confirmed",
+      });
+      datasets.push({
+        label: `${band} spotted`,
+        data: buckets.map((b) => b.spotted[band] || 0),
+        backgroundColor: colour,
+        borderColor: colour,
+        borderWidth: 1,
+        stack: "spotted",
+      });
+    }
+
+    if (chart) {
+      // Replace the data in place: rebuilding the Chart on every refresh
+      // discards the hover state and flashes the canvas.
+      chart.data.labels = labels;
+      chart.data.datasets = datasets;
+      chart.update("none");
+    } else {
+      chart = new Chart(canvas, {
+        type: "bar",
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          // Any bar under the cursor's x position, so hovering an hour shows
+          // every band in it rather than only the segment actually hit.
+          interaction: { mode: "index", intersect: false },
+          scales: {
+            x: {
+              stacked: true,
+              grid: { color: "#21262d" },
+              ticks: { color: "#8b949e", font: { size: 9 }, maxRotation: 0,
+                       autoSkipPadding: 8 },
+            },
+            y: {
+              stacked: true,
+              beginAtZero: true,
+              grid: { color: "#21262d" },
+              ticks: { color: "#8b949e", font: { size: 9 }, precision: 0 },
+              title: { display: true, text: "stations", color: "#8b949e",
+                       font: { size: 9 } },
+            },
+          },
+          plugins: {
+            // Replaced by our own compact legend in the title bar: Chart.js
+            // would list two entries per band, which is 26 chips on a full
+            // day of HF.
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: "#0d1117",
+              borderColor: "#30363d",
+              borderWidth: 1,
+              titleColor: "#c9d1d9",
+              bodyColor: "#c9d1d9",
+              padding: 8,
+              // Empty bands are the majority of any hour; listing them all as
+              // zeros would bury the ones that matter.
+              filter: (item) => item.parsed.y > 0,
+              callbacks: {
+                title: (items) => {
+                  if (!items.length) return "";
+                  const b = (data.buckets || [])[items[0].dataIndex];
+                  return b ? hourLabel(b.start) + " – " +
+                             hourLabel(b.start + (data.bucket_seconds || 3600))
+                           : items[0].label;
+                },
+                label: (item) => `${item.dataset.label}: ${item.parsed.y}`,
+                footer: (items) => {
+                  let confirmed = 0, spotted = 0;
+                  for (const i of items) {
+                    if (i.dataset.stack === "spotted") spotted += i.parsed.y;
+                    else confirmed += i.parsed.y;
+                  }
+                  return `${confirmed} confirmed · ${spotted} spotted`;
+                },
+              },
+            },
+          },
+        },
+      });
+    }
+
+    renderChartLegend(bands);
+    const note = document.getElementById("chart-note");
+    if (note) {
+      const total = buckets.reduce(
+        (n, b) => n + Object.values(b.confirmed).reduce((a, c) => a + c, 0), 0
+      );
+      note.textContent = bands.length
+        ? `${total} station${total === 1 ? "" : "s"} across ` +
+          `${bands.length} band${bands.length === 1 ? "" : "s"} · ` +
+          "distinct callsigns per hour"
+        : "nothing heard in the last 24 hours";
+    }
+  }
+
+  function loadChart() {
+    fetch("api/history")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d) buildChart(d); })
+      .catch(() => {});   // the rest of the dashboard is fine without it
+  }
+
+  // Coalesced: a busy band produces confirmations faster than the chart needs
+  // redrawing, and its resolution is an hour.
+  function scheduleChartRefresh() {
+    if (chartRefreshTimer) return;
+    chartRefreshTimer = setTimeout(() => {
+      chartRefreshTimer = null;
+      loadChart();
+    }, 3000);
+  }
+
   // -- Explain modal --------------------------------------------------------
 
   // Why a given transcript line did or did not produce a callsign. The
@@ -1197,6 +1388,10 @@
   restoreStaticPanels();
   initMap();
   loadReceiver();
+  loadChart();
+  // The window is rolling, so it has to advance on its own — an idle dashboard
+  // would otherwise keep showing an hour axis that ended when it loaded.
+  setInterval(loadChart, 300000);
 
   fetch("api/state")
     .then((r) => r.json())
@@ -1214,11 +1409,15 @@
       setLiveTranscript(null, panelFor(entry));
     });
     es.addEventListener("live", (e) => setLiveTranscript(JSON.parse(e.data)));
-    es.addEventListener("confirmed", (e) => renderConfirmedRow(JSON.parse(e.data)));
+    es.addEventListener("confirmed", (e) => {
+      renderConfirmedRow(JSON.parse(e.data));
+      scheduleChartRefresh();
+    });
     es.addEventListener("spot", (e) => {
       const spot = JSON.parse(e.data);
       renderSpotRow(spot);
       markSpotted(spot);
+      scheduleChartRefresh();
     });
     es.addEventListener("stats", (e) => renderStats(JSON.parse(e.data)));
     es.addEventListener("targets", (e) => renderTargets(JSON.parse(e.data)));
