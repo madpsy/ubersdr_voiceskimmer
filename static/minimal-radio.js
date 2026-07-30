@@ -33,7 +33,7 @@ class MinimalRadio {
         
         // Bandwidth settings (will be adjusted based on mode)
         this.bandwidthLow = 50;
-        this.bandwidthHigh = 2850;
+        this.bandwidthHigh = 2400;
         
         // Spectrum WebSocket state
         this.spectrumWs = null;
@@ -153,12 +153,12 @@ class MinimalRadio {
     setBandwidthForMode(mode) {
         switch (mode.toLowerCase()) {
             case 'lsb':
-                this.bandwidthLow = -2850;
+                this.bandwidthLow = -2400;
                 this.bandwidthHigh = -50;
                 break;
             case 'usb':
                 this.bandwidthLow = 50;
-                this.bandwidthHigh = 2850;
+                this.bandwidthHigh = 2400;
                 break;
             case 'am':
                 // AM uses symmetric bandwidth around carrier
@@ -182,7 +182,7 @@ class MinimalRadio {
             default:
                 // Default to USB bandwidth
                 this.bandwidthLow = 50;
-                this.bandwidthHigh = 2850;
+                this.bandwidthHigh = 2400;
                 break;
         }
     }

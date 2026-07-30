@@ -50,6 +50,15 @@ PCM_V2_MIN_LEN = 33
 # The server writes -999.0 when radiod has no channel status to report.
 PCM_NO_SIGNAL_DATA = -998.0
 
+# Passband edges (Hz, relative to carrier) requested for the audio the
+# extension taps. Narrower than the server's own USB/LSB default (which is
+# wider, ~2850 Hz) to cut audio bandwidth Whisper has to transcribe without
+# losing intelligible voice. Matches static/minimal-radio.js's setBandwidthForMode.
+BANDWIDTH_BY_MODE = {
+    "usb": (50, 2400),
+    "lsb": (-2400, -50),
+}
+
 # Binary message types from the whisper extension (audio_extensions/whisper/decoder.go)
 MSG_SEGMENTS = 0x02
 MSG_LANGUAGE = 0x03
@@ -297,6 +306,7 @@ class UberSDRSession:
         # transcription is unaffected — see audio.go:286 vs websocket.go:1618.
         # The mute_updated reply doubles as our proof the session is live.
         self._send_audio({"type": "set_mute", "muted": True})
+        self._send_bandwidth(self.mode)
 
     def _on_audio_message(self, ws, message) -> None:
         # Binary frames are audio/silence packets. We never decode the audio
@@ -383,6 +393,15 @@ class UberSDRSession:
                 self._audio_ws.send(json.dumps(payload))
             except Exception as exc:
                 log.debug("Audio send failed: %s", exc)
+
+    def _send_bandwidth(self, mode: str) -> None:
+        """Narrow the passband to BANDWIDTH_BY_MODE, if the mode has an entry."""
+        edges = BANDWIDTH_BY_MODE.get((mode or "").lower())
+        if edges is None:
+            return
+        payload = {"type": "tune", "frequency": self.frequency, "mode": self.mode}
+        payload["bandwidthLow"], payload["bandwidthHigh"] = edges
+        self._send_audio(payload)
 
     # -- DX socket ----------------------------------------------------------
 
@@ -577,6 +596,10 @@ class UberSDRSession:
         payload: dict = {"type": "tune", "frequency": int(frequency)}
         if mode:
             payload["mode"] = mode
+
+        edges = BANDWIDTH_BY_MODE.get((mode or self.mode or "").lower())
+        if edges is not None:
+            payload["bandwidthLow"], payload["bandwidthHigh"] = edges
 
         if not self._send_audio_checked(payload):
             return False
