@@ -135,7 +135,8 @@ services:
       #
       # PROGRESS_INTERVAL: "60"
       #
-      # Stick to one exact frequency instead of hopping (for testing)
+      # Stick to one exact frequency instead of hopping. With PARALLEL > 1,
+      # only one worker locks to this frequency — the rest keep hopping.
       # LOCK_FREQ: "7200000"
       # LOCK_MODE: "lsb"
       #

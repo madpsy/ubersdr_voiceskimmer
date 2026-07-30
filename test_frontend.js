@@ -148,6 +148,7 @@ const ID_LIST = [
   "map", "map-note", "layer-confirmed", "layer-spotted",
   "confirmed-stop", "spots-stop", "targets-stop",
   "top-chart", "top-note",
+  "settings-btn", "settings-backdrop", "settings-body", "settings-close",
 ];
 for (const id of ID_LIST) byId[id] = new El("div");
 byId["layer-confirmed"].checked = true;
@@ -266,7 +267,8 @@ const HOOK =
   "\n  globalThis.__test = { applyState, renderConfirmedRow, renderSpotRow," +
   " renderTargets, appendTranscript, setLiveTranscript, redrawConfirmed," +
   " redrawSpots, bandClass, mapStations, tooltipHTML, countryFlag," +
-  " flagHTML, panels, els, startRowAudio, stopRowAudio, buildChart, buildTopChart, bandColour, bandClass };\n})();\n";
+  " flagHTML, panels, els, startRowAudio, stopRowAudio, buildChart, buildTopChart," +
+  " bandColour, bandClass, renderSettings };\n})();\n";
 const patched = src.replace(/\n\}\)\(\);\s*$/, HOOK);
 assert.notStrictEqual(patched, src, "could not find the IIFE close in app.js");
 
@@ -753,6 +755,39 @@ check("clicking a transcript line asks for an explanation", () => {
   byId["transcripts"].appendChild(line);
   byId["transcripts"].fire("click", { target: line });
   assert.ok(byId["explain-backdrop"].classList.contains("open"));
+});
+
+check("clicking the settings button opens the settings modal", () => {
+  byId["settings-btn"].fire("click");
+  assert.ok(byId["settings-backdrop"].classList.contains("open"));
+});
+
+check("Escape closes the settings modal too", () => {
+  byId["settings-btn"].fire("click");
+  assert.ok(byId["settings-backdrop"].classList.contains("open"));
+  global.__fireDocument("keydown", { key: "Escape" });
+  assert.ok(!byId["settings-backdrop"].classList.contains("open"));
+});
+
+check("settings render grouped, human-readable rows", () => {
+  T.renderSettings([
+    { group: "Scanning", items: [
+      { label: "Dwell", value: "30s" },
+      { label: "Parallel workers", value: "2" },
+    ] },
+    { group: "DX cluster", items: [
+      { label: "Spot submission", value: "On" },
+    ] },
+  ]);
+  const html = byId["settings-body"].innerHTML;
+  assert.ok(html.includes("Scanning"), "group heading missing");
+  assert.ok(html.includes("Dwell") && html.includes("30s"));
+  assert.ok(html.includes("DX cluster") && html.includes("Spot submission"));
+});
+
+check("settings render survives an empty list", () => {
+  T.renderSettings([]);
+  assert.ok(byId["settings-body"].innerHTML.includes("No settings"));
 });
 
 console.log(

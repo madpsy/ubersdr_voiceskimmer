@@ -27,7 +27,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from activity import ActivityTracker, Target
 from lookup import CallsignValidator, LookupResult
@@ -210,8 +210,11 @@ class CallsignScanner:
         # to yourself. Not enriched with a DX spot (the exact Hz you give
         # rarely matches the detector's rounded estimate), so
         # agrees_with_dx_spot will always be false here — that's expected.
+        # Only worker 0 locks — with --parallel 1 that's the only worker, so
+        # it locks as expected; with --parallel > 1 the rest keep hopping
+        # normally rather than all piling onto the same frequency.
         self.locked_target: Optional[Target] = None
-        if args.lock_freq is not None:
+        if args.lock_freq is not None and worker_id == 0:
             self.locked_target = Target(
                 band="locked",
                 dial_freq=args.lock_freq,
@@ -282,6 +285,13 @@ class CallsignScanner:
 
         if self.locked_target is not None:
             first = self.locked_target
+            # Claimed here, synchronously, rather than in run(): main()
+            # calls start() for every worker in sequence before any run()
+            # thread is guaranteed to actually execute, so claiming later
+            # would leave a window where another worker's start() picks this
+            # exact frequency as its own initial target before this claim
+            # registers.
+            self.tracker.claim(self.locked_target)
             log.info(
                 "Locked to %.3f MHz %s — rotation disabled for this run",
                 first.dial_freq / 1e6, first.mode.upper(),
@@ -576,6 +586,9 @@ class CallsignScanner:
         keepalive = time.time()
         last_progress = time.time()
 
+        # start() already claimed the locked frequency (for the run's whole
+        # lifetime — see there for why it isn't claimed/released per-dwell
+        # like the rotating case below).
         while self._running:
             if self._session_dead.is_set():
                 if not self._reconnect():
@@ -605,12 +618,16 @@ class CallsignScanner:
                         break
                     continue
 
-            # Held for the whole dwell so no other worker retunes onto it.
-            self.tracker.claim(target)
-            try:
+            if self.locked_target is not None:
+                # Already claimed for the run's lifetime above.
                 self._dwell(target)
-            finally:
-                self.tracker.release(target)
+            else:
+                # Held for the whole dwell so no other worker retunes onto it.
+                self.tracker.claim(target)
+                try:
+                    self._dwell(target)
+                finally:
+                    self.tracker.release(target)
             self._last_key = target.key
 
             if time.time() - keepalive > 30:
@@ -1336,13 +1353,15 @@ def parse_args(argv=None):
     scan.add_argument("--lock-freq", type=int, default=None,
                       help="Stay on this exact frequency (Hz) forever instead "
                            "of hopping around detected voice activity — for "
-                           "confirming the pipeline catches one specific known "
-                           "signal. Listens continuously and reports every "
-                           "validated callsign as it's heard; --silence-timeout "
-                           "and the confirmed-callsign early exit do not apply "
-                           "since there is nowhere to move on to. Requires "
-                           "--lock-mode. Example: --lock-freq 7200000 "
-                           "--lock-mode lsb")
+                           "permanently monitoring one known net/repeater/beacon, "
+                           "or confirming the pipeline catches a specific signal. "
+                           "Listens continuously and reports every validated "
+                           "callsign as it's heard; --silence-timeout and the "
+                           "confirmed-callsign early exit do not apply since "
+                           "there is nowhere to move on to. With --parallel > 1, "
+                           "only worker 0 locks to this frequency and the rest "
+                           "scan normally. Requires --lock-mode. Example: "
+                           "--lock-freq 7200000 --lock-mode lsb")
     scan.add_argument("--lock-mode", default="usb",
                       choices=["usb", "lsb", "am", "sam", "fm", "nfm", "cwu", "cwl"],
                       help="Mode for --lock-freq")
@@ -1398,8 +1417,8 @@ def parse_args(argv=None):
                            "every slot and leaves none for web UI users. "
                            "Either way each session is a concurrent "
                            "transcription on the WhisperLive server. "
-                           "Ignored with --lock-freq, which pins a single "
-                           "frequency.")
+                           "With --lock-freq, only worker 0 stays pinned to "
+                           "that frequency — the rest scan normally.")
     scan.add_argument("--silence-min-snr", type=float, default=40.0,
                       help="Peak SNR (dB) that must be seen within "
                            "--silence-timeout for a frequency to count as "
@@ -1562,6 +1581,94 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def _fmt_bool(value: bool) -> str:
+    return "On" if value else "Off"
+
+
+def _fmt_secs(value: float) -> str:
+    # %g rather than a fixed number of decimals: 30.0 -> "30s", 2.5 -> "2.5s",
+    # with nothing trailing for the whole-second case that is most of these.
+    return f"{value:g}s"
+
+
+def _fmt_pct(value: float) -> str:
+    return f"{value * 100:.0f}%"
+
+
+def build_settings(args) -> List[Dict[str, Any]]:
+    """
+    Runtime settings for the dashboard's "?" modal (GET /api/settings),
+    grouped and formatted for a human reading them rather than dumped as raw
+    argparse values.
+
+    Deliberately excludes the UberSDR host/port (connection details, not scan
+    settings) and every credential — --password and --spotter-pass — which
+    have no business being served over HTTP to anyone with the dashboard URL.
+    """
+    band = ", ".join(sorted(args.band)) if args.band else "All bands"
+    lock = (
+        f"{args.lock_freq / 1e6:.3f} MHz ({args.lock_mode.upper()})"
+        if args.lock_freq is not None else "Off (normal rotation)"
+    )
+
+    return [
+        {"group": "Connection", "items": [
+            {"label": "SSL/WSS", "value": _fmt_bool(args.ssl)},
+        ]},
+        {"group": "Scanning", "items": [
+            {"label": "Lock to one frequency", "value": lock},
+            {"label": "Band filter", "value": band},
+            {"label": "Dwell", "value": _fmt_secs(args.dwell)},
+            {"label": "Dwell extension", "value": _fmt_secs(args.dwell_extension)},
+            {"label": "Max dwell", "value": _fmt_secs(args.max_dwell)},
+            {"label": "Revisit dwell period", "value": _fmt_secs(args.revisit_dwell_period)},
+            {"label": "Revisit dwell percent", "value": _fmt_pct(args.revisit_dwell_percent)},
+            {"label": "Silence timeout", "value": _fmt_secs(args.silence_timeout)},
+            {"label": "Parallel workers", "value": str(args.parallel)},
+            {"label": "Silence min SNR", "value": f"{args.silence_min_snr:g} dB"},
+            {"label": "Silence min words", "value": str(args.silence_min_words)},
+            {"label": "Revisit cooldown", "value": _fmt_secs(args.revisit_cooldown)},
+            {"label": "Min SNR", "value": f"{args.min_snr:g} dB"},
+            {"label": "Min confidence", "value": _fmt_pct(args.min_confidence)},
+        ]},
+        {"group": "Extraction", "items": [
+            {"label": "Min callsign length", "value": str(args.min_callsign_length)},
+            {"label": "Min extract confidence", "value": _fmt_pct(args.min_extract_confidence)},
+            {"label": "Max candidates per segment", "value": str(args.max_candidates)},
+            {"label": "QRZ lookup interval",
+             "value": _fmt_secs(args.lookup_interval) if args.lookup_interval else "No minimum"},
+            {"label": "CTY prefilter", "value": "Skipped" if args.no_prefilter else "Enabled"},
+            {"label": "Segment join gap",
+             "value": _fmt_secs(args.segment_join_gap) if args.segment_join_gap else "Disabled"},
+        ]},
+        {"group": "Whisper", "items": [
+            {"label": "Initial prompt", "value": args.prompt or "(none)"},
+            {"label": "Recognition language", "value": args.asr_language},
+            {"label": "Pipeline latency", "value": _fmt_secs(args.pipeline_latency)},
+            {"label": "Stock Whisper (no client params)", "value": _fmt_bool(args.stock_whisper)},
+        ]},
+        {"group": "DX cluster", "items": [
+            {"label": "Spot submission", "value": _fmt_bool(args.spot)},
+            {"label": "Spotter callsign", "value": args.spotter_call or "Not set"},
+            {"label": "Spot cooldown", "value": _fmt_secs(args.spot_cooldown)},
+            {"label": "Spot frequency tolerance", "value": f"{args.spot_freq_tolerance} Hz"},
+            {"label": "Spot max entries", "value": str(args.spot_max_entries)},
+            {"label": "Spot tag", "value": args.spot_tag},
+            {"label": "Spot min hits", "value": str(args.spot_min_hits)},
+        ]},
+        {"group": "Web UI", "items": [
+            {"label": "Dashboard port", "value": str(args.web_port) if args.web_port else "Disabled"},
+            {"label": "Dashboard bind address", "value": args.web_host},
+        ]},
+        {"group": "Output", "items": [
+            {"label": "Detection log", "value": args.output or "Disabled"},
+            {"label": "Verbose logging", "value": _fmt_bool(args.verbose)},
+            {"label": "Progress heartbeat",
+             "value": _fmt_secs(args.progress_interval) if args.progress_interval else "Disabled"},
+        ]},
+    ]
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
 
@@ -1596,10 +1703,15 @@ def main(argv=None) -> int:
 
     parallel = max(1, args.parallel)
     if parallel > 1 and args.lock_freq is not None:
-        # Every worker would lock onto the same frequency and transcribe
-        # identical audio, burning a Whisper slot for nothing.
-        log.warning("--lock-freq pins one frequency; forcing --parallel 1")
-        parallel = 1
+        # Worker 0 locks onto the frequency; the rest keep hopping normally
+        # (see CallsignScanner.__init__).
+        log.info(
+            "--lock-freq: worker 0 stays on %.3f MHz %s; the other %d "
+            "worker%s scan%s normally",
+            args.lock_freq / 1e6, args.lock_mode.upper(), parallel - 1,
+            "" if parallel - 1 == 1 else "s",
+            "s" if parallel - 1 == 1 else "",
+        )
 
     # The ceiling is applied as min(max(dwell, extended), max_dwell), so a
     # max_dwell below dwell silently truncates the BASE dwell rather than only
@@ -1624,6 +1736,7 @@ def main(argv=None) -> int:
                 "min_callsign_length": args.min_callsign_length,
                 "spot_min_hits": args.spot_min_hits,
             },
+            settings=build_settings(args),
         )
         web_ui.start(args.web_host, args.web_port)
 

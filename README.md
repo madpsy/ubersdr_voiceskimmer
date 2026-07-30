@@ -389,6 +389,7 @@ durable record. Nothing here is authenticated — see the note on exposure in
 | `GET /api/events` | SSE stream of incremental updates. |
 | `POST /api/explain` | Why a transcript line did or did not yield a callsign. Body `{"text": "..."}`. Rate limited 1/s per address. |
 | `GET /api/audio/<worker>` | Live audio from that worker, WebM/Opus. |
+| `GET /api/settings` | The scan's runtime settings, grouped and human-readable — backs the "?" button next to the stats bar. Excludes the UberSDR host/port and any credential (`--password`, `--spotter-pass`). |
 
 ## 7. Tests
 
@@ -462,7 +463,7 @@ out in `docker-compose.yml` — an unset variable means the flag is not passed a
 |---|---|---|---|
 | `BAND` | `--band` | — |  |
 | `PARALLEL` | `--parallel` | `1` | each worker holds a Whisper slot; server default is 2 |
-| `LOCK_FREQ` | `--lock-freq` | — | Hz; pins one frequency (forces `PARALLEL` to 1) |
+| `LOCK_FREQ` | `--lock-freq` | — | Hz; pins worker 0 to one frequency. With `PARALLEL` > 1 the rest keep hopping normally |
 | `LOCK_MODE` | `--lock-mode` | `usb` |  |
 
 **Dwell timing — seconds**

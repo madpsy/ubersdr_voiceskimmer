@@ -25,6 +25,10 @@
     explainBackdrop: document.getElementById("explain-backdrop"),
     explainBody: document.getElementById("explain-body"),
     explainClose: document.getElementById("explain-close"),
+    settingsBtn: document.getElementById("settings-btn"),
+    settingsBackdrop: document.getElementById("settings-backdrop"),
+    settingsBody: document.getElementById("settings-body"),
+    settingsClose: document.getElementById("settings-close"),
     confirmedFilter: document.getElementById("confirmed-filter"),
     spotsFilter: document.getElementById("spots-filter"),
     confirmedStop: document.getElementById("confirmed-stop"),
@@ -1256,6 +1260,58 @@
     els.explainBody.scrollTop = 0;
   }
 
+  // -- Settings modal -----------------------------------------------------
+
+  // The running scan's configuration doesn't change, so the first fetch is
+  // cached rather than re-requested on every open.
+  let settingsCache = null;
+
+  function closeSettings() {
+    els.settingsBackdrop.classList.remove("open");
+  }
+
+  function renderSettings(groups) {
+    if (!groups || !groups.length) {
+      els.settingsBody.innerHTML = '<p class="ex-note">No settings reported.</p>';
+      return;
+    }
+    els.settingsBody.innerHTML = groups
+      .map((g) => {
+        const rows = (g.items || [])
+          .map(
+            (it) =>
+              `<div class="set-row"><span class="label">${esc(it.label)}</span>` +
+              `<span class="value">${esc(String(it.value))}</span></div>`
+          )
+          .join("");
+        return `<div class="set-group"><h3>${esc(g.group)}</h3>${rows}</div>`;
+      })
+      .join("");
+    els.settingsBody.scrollTop = 0;
+  }
+
+  function openSettings() {
+    els.settingsBackdrop.classList.add("open");
+    if (settingsCache) {
+      renderSettings(settingsCache);
+      return;
+    }
+    els.settingsBody.innerHTML = '<p class="ex-note">Loading…</p>';
+    fetch("api/settings")
+      .then((r) => {
+        if (!r.ok) return Promise.reject(new Error("HTTP " + r.status));
+        return r.json();
+      })
+      .then((groups) => {
+        settingsCache = groups;
+        renderSettings(groups);
+      })
+      .catch((err) => {
+        els.settingsBody.innerHTML =
+          `<p class="ex-note">Could not load settings: ${esc(String(err))}</p>`;
+      });
+  }
+
   // Delegated, because transcript lines are created and evicted constantly.
   els.transcripts.addEventListener("click", (e) => {
     const line = e.target.closest(".final");
@@ -1265,8 +1321,13 @@
   els.explainBackdrop.addEventListener("click", (e) => {
     if (e.target === els.explainBackdrop) closeExplain();
   });
+  els.settingsBtn.addEventListener("click", openSettings);
+  els.settingsClose.addEventListener("click", closeSettings);
+  els.settingsBackdrop.addEventListener("click", (e) => {
+    if (e.target === els.settingsBackdrop) closeSettings();
+  });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeExplain();
+    if (e.key === "Escape") { closeExplain(); closeSettings(); }
   });
 
   // Filters redraw from the client-side copies, so a row hidden by the filter

@@ -8,6 +8,7 @@ idle bonus at zero, so a pure priority sort will keep picking it and the rest of
 the band never gets scanned.
 """
 
+import json
 import time
 import unittest
 
@@ -174,6 +175,132 @@ class TestRotation(unittest.TestCase):
         share = order.count(14200000) / len(order)
         self.assertGreater(share, 1 / 6, "strong target not favoured at all")
         self.assertLess(share, 0.5, "strong target monopolised the scan")
+
+
+class TestClaimExcludesByFrequency(unittest.TestCase):
+    """
+    A --lock-freq worker's Target uses the synthetic band "locked", which
+    never matches a real target's (band, freq) key. Claiming must therefore
+    key on dial_freq alone — otherwise another worker's next_target() would
+    happily hop onto the exact frequency the locked worker is sitting on.
+    """
+
+    def test_locked_band_claim_excludes_real_target_on_same_freq(self):
+        real = make(7200000, band="40m")
+        locked = make(7200000, band="locked")
+
+        tracker = tracker_with(real)
+        tracker.claim(locked)
+
+        self.assertIsNone(tracker.next_target())
+
+    def test_release_restores_it(self):
+        real = make(7200000, band="40m")
+        locked = make(7200000, band="locked")
+
+        tracker = tracker_with(real)
+        tracker.claim(locked)
+        tracker.release(locked)
+
+        self.assertEqual(tracker.next_target().key, real.key)
+
+
+class TestLockFreqOnlyLocksWorkerZero(unittest.TestCase):
+    """
+    With --parallel > 1, only worker 0 should pin to --lock-freq — the rest
+    must keep rotating through the tracker like normal, and worker 0's
+    start() must claim the frequency (see CallsignScanner.start) before any
+    other worker's start() can pick it as an initial target.
+    """
+
+    def _args(self, parallel):
+        return parse_args([
+            "--host", "x", "--lock-freq", "7200000", "--lock-mode", "lsb",
+            "--parallel", str(parallel),
+        ])
+
+    def test_worker_zero_locks(self):
+        args = self._args(2)
+        shared = SharedState(args, "http://x")
+        sc = CallsignScanner(args, shared=shared, worker_id=0)
+        self.assertIsNotNone(sc.locked_target)
+        self.assertEqual(sc.locked_target.dial_freq, 7200000)
+        self.assertEqual(sc.locked_target.mode, "lsb")
+
+    def test_other_workers_do_not_lock(self):
+        args = self._args(2)
+        shared = SharedState(args, "http://x")
+        sc = CallsignScanner(args, shared=shared, worker_id=1)
+        self.assertIsNone(sc.locked_target)
+
+    def test_single_worker_still_locks(self):
+        args = self._args(1)
+        shared = SharedState(args, "http://x")
+        sc = CallsignScanner(args, shared=shared, worker_id=0)
+        self.assertIsNotNone(sc.locked_target)
+
+
+class TestBuildSettings(unittest.TestCase):
+    """
+    GET /api/settings serves scanner.build_settings(args) straight to the
+    dashboard, so it must never carry the UberSDR host/port or any
+    credential — a bypass password or DX cluster spot password reaching an
+    HTTP endpoint would defeat the point of keeping them out of logs/URLs.
+    """
+
+    def _values(self, args):
+        return {
+            item["label"]: item["value"]
+            for group in scanner.build_settings(args)
+            for item in group["items"]
+        }
+
+    def test_excludes_host_and_port(self):
+        args = parse_args(["--host", "sdr.example.com", "--port", "9999"])
+        blob = json.dumps(scanner.build_settings(args))
+        self.assertNotIn("sdr.example.com", blob)
+        self.assertNotIn("9999", blob)
+
+    def test_excludes_bypass_password(self):
+        args = parse_args(["--host", "x", "--password", "s3cr3t-bypass"])
+        blob = json.dumps(scanner.build_settings(args))
+        self.assertNotIn("s3cr3t-bypass", blob)
+
+    def test_excludes_dx_cluster_password(self):
+        args = parse_args([
+            "--host", "x", "--spot", "--spotter-call", "M0ABC",
+            "--spotter-pass", "hunter2",
+        ])
+        blob = json.dumps(scanner.build_settings(args))
+        self.assertNotIn("hunter2", blob)
+        # The callsign is not a secret and should still be reported.
+        self.assertIn("M0ABC", blob)
+
+    def test_lock_freq_formatted_in_mhz_with_mode(self):
+        args = parse_args(["--host", "x", "--lock-freq", "7200000", "--lock-mode", "lsb"])
+        values = self._values(args)
+        self.assertEqual(values["Lock to one frequency"], "7.200 MHz (LSB)")
+
+    def test_lock_freq_off_by_default(self):
+        args = parse_args(["--host", "x"])
+        values = self._values(args)
+        self.assertEqual(values["Lock to one frequency"], "Off (normal rotation)")
+
+    def test_band_filter_lists_bands(self):
+        args = parse_args(["--host", "x", "--band", "40m,20m"])
+        values = self._values(args)
+        self.assertEqual(values["Band filter"], "20m, 40m")
+
+    def test_band_filter_unset_is_all_bands(self):
+        args = parse_args(["--host", "x"])
+        values = self._values(args)
+        self.assertEqual(values["Band filter"], "All bands")
+
+    def test_booleans_are_on_off(self):
+        args = parse_args(["--host", "x", "--ssl"])
+        values = self._values(args)
+        self.assertEqual(values["SSL/WSS"], "On")
+        self.assertEqual(values["Stock Whisper (no client params)"], "Off")
 
 
 class TestVisitAccounting(unittest.TestCase):

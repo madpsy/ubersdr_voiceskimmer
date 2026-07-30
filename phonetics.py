@@ -90,6 +90,7 @@ LOOSE_LETTERS: Dict[str, str] = {
     "glasgow": "G", "gibraltar": "G", "golf!": "G",
     "gulf": "G",  # common ASR mishearing of "Golf" (observed live)
     "golfer": "G",  # ditto, when the next word runs into it (observed live)
+    "gold": "G",  # ditto, common ASR mishearing of "Golf" (observed live)
     "henry": "H", "honolulu": "H", "havana": "H", "holland": "H",
     "harry": "H", "houston": "H", "hotel!": "H",
     "italy": "I", "india!": "I", "item": "I", "ireland": "I",

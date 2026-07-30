@@ -25,6 +25,8 @@ addons' web UIs, e.g. ubersdr_lightning's /api/status + /api/events):
     GET  /api/events    SSE stream of incremental events: hop, transcript,
                         confirmed, spot, stats. A fresh "state" event is sent
                         first so a client that connects mid-run isn't blank.
+    GET  /api/settings  Runtime settings the scan was started with, grouped
+                        and human-readable — for the dashboard's "?" modal.
 """
 
 import json
@@ -290,6 +292,7 @@ class WebUI:
         # a reload shows the same history the live view was holding.
         self, workers: int = 1, transcript_maxlen: int = 200, spots_maxlen: int = 100,
         gates: Optional[Dict[str, Any]] = None,
+        settings: Optional[List[Dict[str, Any]]] = None,
     ):
         self._lock = threading.Lock()
         self._start_time = time.time()
@@ -298,6 +301,11 @@ class WebUI:
         # say "extracted but dropped for scoring 0.30" rather than leaving the
         # user to guess which gate a callsign died at.
         self.gates: Dict[str, Any] = gates or {}
+        # Static for the run's lifetime — built once from argparse by
+        # scanner.py's build_settings() and handed straight through, so this
+        # module never needs to know what a "setting" is, only how to serve
+        # one. See /api/settings.
+        self.settings: List[Dict[str, Any]] = settings or []
         # /api/explain is the one endpoint that does real work on
         # caller-supplied input, so it is the one worth pacing. The rest
         # serve state the scanner has already computed.
@@ -414,6 +422,16 @@ class WebUI:
                 mimetype="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
+
+        @app.route("/api/settings")
+        def api_settings():
+            """
+            Runtime settings for the "?" modal — everything scanner.py was
+            started with except the UberSDR host/port and any credential.
+            Static for the run's lifetime, so like /api/state this is not
+            rate limited.
+            """
+            return jsonify(self.settings)
 
         @app.route("/api/history")
         def api_history():

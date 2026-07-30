@@ -118,8 +118,12 @@ class ActivityTracker:
         self.expiry = expiry
 
         self._targets: Dict[Tuple[str, int], Target] = {}
-        # Frequencies a worker is sitting on right now — see next_target.
-        self._claimed: Set[Tuple[str, int]] = set()
+        # Dial frequencies a worker is sitting on right now — see next_target.
+        # Keyed on dial_freq alone, not the full (band, freq) key: a
+        # --lock-freq worker's Target uses the synthetic band "locked", which
+        # would never match a real target's key and so would fail to exclude
+        # the frequency it is actually sitting on.
+        self._claimed: Set[int] = set()
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -314,7 +318,8 @@ class ActivityTracker:
         with self._lock:
             self._expire()
             everything = [
-                t for t in self._targets.values() if t.key not in self._claimed
+                t for t in self._targets.values()
+                if t.dial_freq not in self._claimed
             ]
             if not everything:
                 return None
@@ -333,13 +338,13 @@ class ActivityTracker:
     def claim(self, target: Target) -> None:
         """Mark a frequency as being scanned, so no other worker picks it."""
         with self._lock:
-            self._claimed.add(target.key)
+            self._claimed.add(target.dial_freq)
 
     def release(self, target: Target) -> None:
         with self._lock:
-            self._claimed.discard(target.key)
+            self._claimed.discard(target.dial_freq)
 
-    def claimed(self) -> Set[Tuple[str, int]]:
+    def claimed(self) -> Set[int]:
         with self._lock:
             return set(self._claimed)
 
