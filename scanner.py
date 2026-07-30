@@ -49,7 +49,7 @@ log = logging.getLogger("scanner")
 # long, _watchdog_loop forces a re-attach. Matches the dashboard's own
 # "no activity" indicator (static/app.js ACTIVITY_STALE_MS) so a worker the
 # UI is showing as stalled is also the one the backend is trying to fix.
-WHISPER_STALL_TIMEOUT = 15.0
+WHISPER_STALL_TIMEOUT = 20.0
 
 # _process_partial re-runs extraction on every growing Whisper interim
 # hypothesis, so the same utterance can validate the same callsign several

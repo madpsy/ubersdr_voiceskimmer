@@ -357,7 +357,7 @@
     p.dot.title = st.detail || (up ? "transcribing" : down ? "not connected" : "connecting");
   }
 
-  const ACTIVITY_STALE_MS = 15000;
+  const ACTIVITY_STALE_MS = 20000;
 
   // Briefly lights up next to the connection dot so a collapsed panel still
   // shows whether transcript segments are actually arriving, not just that
@@ -1649,7 +1649,14 @@
       setLiveTranscript(null, p);
       flashActivity(p);
     });
-    es.addEventListener("live", (e) => setLiveTranscript(JSON.parse(e.data)));
+    es.addEventListener("live", (e) => {
+      // A growing in-progress line is just as much evidence Whisper is
+      // transcribing as a completed segment — treat it the same way for the
+      // activity dot instead of only resetting on sentence completion.
+      const entry = JSON.parse(e.data);
+      setLiveTranscript(entry);
+      flashActivity(panelFor(entry));
+    });
     es.addEventListener("confirmed", (e) => {
       renderConfirmedRow(JSON.parse(e.data));
       scheduleChartRefresh();
