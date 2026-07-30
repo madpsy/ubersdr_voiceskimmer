@@ -186,6 +186,11 @@ class CallsignScanner:
         # mid-utterance (max_speech_duration_s forces a break every 15s with
         # no real pause). Reset to [] on every genuine hop in _dwell().
         self._segment_history: List[Segment] = []
+        # How much of the normal dwell this frequency gets, 1.0 unless it is a
+        # revisit to somewhere already spotted — see _dwell and
+        # --revisit-dwell-percent. Read by the segment worker when it extends
+        # a dwell, so it is published under _extend_lock.
+        self._dwell_scale = 1.0
         # Completed segments already handled, keyed by exact text and the
         # frequency they were credited to. Hopping sends reset_transcript to
         # clear the SERVER's duplicate suppression — necessary so a repeated
@@ -544,11 +549,36 @@ class CallsignScanner:
             self._heard_words = 0
             self._peak_snr = None      # measured fresh for this dwell
 
-        deadline = started + self.args.dwell
+        # A frequency we have already spotted from recently is worth another
+        # look — a net or a pile-up keeps producing callsigns — but not a full
+        # dwell, because the most likely outcome is hearing the station we
+        # already spotted. So every timing for this dwell is scaled down
+        # together: shortening only the base dwell would leave the ceiling and
+        # the silence timeout to undo it.
+        scale = 1.0
+        since_spot = None
+        if self.locked_target is None and self.args.revisit_dwell_percent < 1.0:
+            since_spot = self.spot_throttle.seconds_since_spot_on(target.dial_freq)
+            if since_spot is not None and since_spot < self.args.revisit_dwell_period:
+                scale = self.args.revisit_dwell_percent
+        with self._extend_lock:
+            # Read by the segment worker when it extends a dwell, so it is
+            # published under the same lock that guards _extend_until.
+            self._dwell_scale = scale
+
+        deadline = started + self.args.dwell * scale
         # Each unvalidated candidate pushes the deadline out, so without a
         # hard ceiling a busy net would hold the scanner indefinitely.
-        hard_deadline = started + self.args.max_dwell
-        silence_deadline = started + self.args.silence_timeout
+        hard_deadline = started + self.args.max_dwell * scale
+        silence_deadline = started + self.args.silence_timeout * scale
+
+        if scale < 1.0:
+            log.info(
+                "   ↻ spotted here %.0fs ago — dwelling %.0f%% (%.0fs base, "
+                "%.0fs ceiling, %.0fs silence)",
+                since_spot, scale * 100, self.args.dwell * scale,
+                self.args.max_dwell * scale, self.args.silence_timeout * scale,
+            )
 
         # Locked mode has nowhere to "move on" to, so the confirmed/silence
         # early-exits below are meaningless — every validated callsign is
@@ -754,7 +784,9 @@ class CallsignScanner:
                 # little in case a repeat lets it validate.
                 with self._extend_lock:
                     self._extend_until = max(
-                        self._extend_until, time.time() + self.args.dwell_extension
+                        self._extend_until,
+                        time.time()
+                        + self.args.dwell_extension * self._dwell_scale,
                     )
 
     def _joined_history_text(self, segment: Segment) -> Optional[str]:
@@ -1104,6 +1136,25 @@ def parse_band_list(value: str) -> Set[str]:
     return bands
 
 
+def percent(value: str) -> float:
+    """
+    A fraction in (0, 1]. Rejected rather than clamped: 0 would mean never
+    listening to a revisited frequency at all, and a value above 1 would make
+    a "reduced" dwell longer than a normal one, so either is far more likely
+    to be a typo than an intention.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number")
+    if not 0 < parsed <= 1:
+        raise argparse.ArgumentTypeError(
+            f"{value} is out of range — use a fraction above 0 and at most 1 "
+            "(1.0 means no reduction)"
+        )
+    return parsed
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Scan UberSDR voice activity and extract callsigns via Whisper",
@@ -1152,6 +1203,19 @@ def parse_args(argv=None):
                            "--dwell-extension; raise it to give a busy "
                            "frequency more chances to resolve a callsign, at "
                            "the cost of visiting fewer frequencies")
+    scan.add_argument("--revisit-dwell-period", type=float, default=900.0,
+                      help="A frequency this scanner has already submitted a "
+                           "DX spot from within this many seconds is treated "
+                           "as a revisit and gets a shortened dwell — see "
+                           "--revisit-dwell-percent. Distinct from "
+                           "--revisit-cooldown, which decides whether a "
+                           "frequency may be visited at all")
+    scan.add_argument("--revisit-dwell-percent", type=percent, default=0.50,
+                      help="Fraction of the normal dwell times to spend on a "
+                           "revisit (see --revisit-dwell-period): the base "
+                           "dwell, the ceiling, the silence timeout and the "
+                           "extension are all scaled by it. 1.0 means treat a "
+                           "revisit like anything else. Range 0-1")
     scan.add_argument("--silence-timeout", type=float, default=10.0,
                       help="Move on early if fewer than --silence-min-words "
                            "have been transcribed within this many seconds of "

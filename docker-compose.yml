@@ -32,6 +32,19 @@ services:
       # DWELL_EXTENSION: "30"
       # REVISIT_COOLDOWN: "120"
       #
+      # Revisits. A frequency this scanner has ALREADY submitted a DX spot
+      # from within REVISIT_DWELL_PERIOD is still worth another look — a net
+      # or a pile-up keeps producing callsigns — but the likeliest outcome is
+      # hearing the station already spotted, so it gets a shorter dwell.
+      # REVISIT_DWELL_PERCENT scales every timing above together (base dwell,
+      # ceiling, silence timeout and extension); scaling only one would let
+      # the others undo it. Set 1.00 to treat revisits like anything else.
+      #
+      # Not the same as REVISIT_COOLDOWN, which decides whether a frequency
+      # may be visited AT ALL. This decides how long once it is.
+      # REVISIT_DWELL_PERIOD: "900"
+      # REVISIT_DWELL_PERCENT: "0.50"
+      #
       # Ignore weak/uncertain voice activity
       # MIN_SNR: "8"
       # MIN_CONFIDENCE: "0.7"

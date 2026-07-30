@@ -17,6 +17,10 @@
 #   DWELL_EXTENSION       Extra seconds when something callsign-shaped is heard
 #                         but has not validated yet                (default: 30)
 #   REVISIT_COOLDOWN      Seconds before a frequency may be revisited (default: 120)
+#   REVISIT_DWELL_PERIOD  A frequency already DX-spotted from within this many
+#                         seconds counts as a revisit               (default: 900)
+#   REVISIT_DWELL_PERCENT Fraction of the normal dwell times to spend on such a
+#                         revisit; 1.0 = no reduction               (default: 0.50)
 #   MIN_SNR               Ignore activity below this SNR         (default: 8)
 #   MIN_CONFIDENCE        Ignore activity below this confidence   (default: 0.7)
 #   SILENCE_MIN_SNR       Peak SNR (dB) within SILENCE_TIMEOUT for a frequency
@@ -67,6 +71,8 @@ args=""
 [ -n "$MAX_DWELL"            ] && args="$args --max-dwell $MAX_DWELL"
 [ -n "$DWELL_EXTENSION"      ] && args="$args --dwell-extension $DWELL_EXTENSION"
 [ -n "$REVISIT_COOLDOWN"     ] && args="$args --revisit-cooldown $REVISIT_COOLDOWN"
+[ -n "$REVISIT_DWELL_PERIOD" ] && args="$args --revisit-dwell-period $REVISIT_DWELL_PERIOD"
+[ -n "$REVISIT_DWELL_PERCENT" ] && args="$args --revisit-dwell-percent $REVISIT_DWELL_PERCENT"
 [ -n "$MIN_SNR"              ] && args="$args --min-snr $MIN_SNR"
 [ -n "$MIN_CONFIDENCE"       ] && args="$args --min-confidence $MIN_CONFIDENCE"
 [ -n "$SILENCE_MIN_SNR"      ] && args="$args --silence-min-snr $SILENCE_MIN_SNR"

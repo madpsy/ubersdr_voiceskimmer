@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Tests for SpotThrottle — the (callsign, frequency) re-spot cooldown."""
 
+import argparse
 import unittest
 
 import dxcluster
+from scanner import percent
 from dxcluster import SpotThrottle
 
 
@@ -140,5 +142,65 @@ class TestSpotMinHits(unittest.TestCase):
         self.assertLessEqual(len(t._hits), 5)
 
 
+class TestRevisitSpotHistory(unittest.TestCase):
+    """
+    Backs --revisit-dwell-percent: how long since ANY callsign was spotted on
+    a frequency, so a frequency already producing spots gets a shorter dwell.
+    """
+
+    def test_none_before_any_spot(self):
+        st = SpotThrottle(freq_tolerance_hz=500)
+        self.assertIsNone(st.seconds_since_spot_on(14226000))
+
+    def test_records_on_spot(self):
+        st = SpotThrottle(freq_tolerance_hz=500)
+        st.record("G0VIM", 14226000)
+        since = st.seconds_since_spot_on(14226000)
+        self.assertIsNotNone(since)
+        self.assertLess(since, 1.0)
+
+    def test_keyed_on_frequency_not_callsign(self):
+        # The reduction is about the frequency having produced a spot, not
+        # about which station it was — a different call asking about the same
+        # frequency must see it.
+        st = SpotThrottle(freq_tolerance_hz=500)
+        st.record("G0VIM", 14226000)
+        self.assertIsNotNone(st.seconds_since_spot_on(14226000))
+
+    def test_shares_the_frequency_bucketing(self):
+        # Dial drift within tolerance is the same frequency, exactly as for
+        # the cooldown and the hit count.
+        st = SpotThrottle(freq_tolerance_hz=500)
+        st.record("G0VIM", 14226000)
+        self.assertIsNotNone(st.seconds_since_spot_on(14226200))
+        self.assertIsNone(st.seconds_since_spot_on(14230000))
+
+    def test_other_frequencies_unaffected(self):
+        st = SpotThrottle(freq_tolerance_hz=500)
+        st.record("G0VIM", 14226000)
+        self.assertIsNone(st.seconds_since_spot_on(7155000))
+
+    def test_bounded(self):
+        st = SpotThrottle(freq_tolerance_hz=500, max_entries=50)
+        for i in range(500):
+            st.record("C%d" % i, 7000000 + i * 5000)
+        self.assertLessEqual(len(st._last_freq_spot), 50)
+
+
+class TestRevisitPercentFlag(unittest.TestCase):
+    def test_accepts_a_fraction_and_one(self):
+        self.assertEqual(percent("0.5"), 0.5)
+        self.assertEqual(percent("1.0"), 1.0)
+        self.assertEqual(percent("1"), 1.0)
+
+    def test_rejects_zero_and_above_one(self):
+        # 0 would mean never listening to a revisit at all, and >1 would make
+        # a "reduced" dwell longer than a normal one — both far likelier to be
+        # typos than intentions.
+        for bad in ["0", "0.0", "1.01", "2", "-0.5", "abc", ""]:
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                percent(bad)
+
+
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main()

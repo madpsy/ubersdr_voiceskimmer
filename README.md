@@ -180,7 +180,9 @@ exact frequency, so on a quiet instance expect zeroes.
 | `--max-dwell` | 60 s | Ceiling, so a busy net cannot hold the scanner. The default allows `--dwell` plus one `--dwell-extension` |
 | `--silence-timeout` | 10 s | Move on early if nothing is heard at all — dead air, not a real dwell |
 | `--dwell-extension` | 30 s | Extra time when something callsign-shaped is heard but not yet validated |
-| `--revisit-cooldown` | 120 s | How long before a frequency may be revisited |
+| `--revisit-cooldown` | 120 s | How long before a frequency may be revisited at all |
+| `--revisit-dwell-period` | 900 s | A frequency this scanner has already submitted a DX spot from within this long counts as a *revisit* |
+| `--revisit-dwell-percent` | 0.50 | Fraction of the normal dwell times to spend on such a revisit. `1.0` treats it like anything else |
 | `--min-snr` | 8.0 | Raise to skip marginal signals |
 | `--min-extract-confidence` | 0.4 | Raise for precision, lower for recall |
 | `--min-callsign-length` | 4 | Minimum callsign length to be looked up at all — shorter ones never reach QRZ, so are never confirmed or spotted. Applies to literal verbatim matches too |
@@ -392,6 +394,7 @@ Every `scanner.py` flag has an environment-variable equivalent (see
 | `UBERSDR_HOST` / `UBERSDR_PORT` / `UBERSDR_SSL` / `UBERSDR_PASS` | `--host`/`--port`/`--ssl`/`--password` | `ubersdr` / `8080` / off / — |
 | `BAND` | `--band` | all bands |
 | `DWELL` / `MAX_DWELL` | `--dwell`/`--max-dwell` | `30` / `60` |
+| `REVISIT_DWELL_PERIOD` / `REVISIT_DWELL_PERCENT` | `--revisit-dwell-period`/`--revisit-dwell-percent` | `900` / `0.50` |
 | `MIN_SNR` / `MIN_CONFIDENCE` | `--min-snr`/`--min-confidence` | `8` / `0.7` |
 | `LOCK_FREQ` / `LOCK_MODE` | `--lock-freq`/`--lock-mode` | — (hop normally) |
 | `STOCK_WHISPER` | `--stock-whisper` | off |
@@ -526,6 +529,30 @@ On every hop the scanner sends a `reset_transcript` control message, clearing
 Whisper's duplicate-suppression history — without it a genuine new "this is …"
 on the new frequency is dropped as a duplicate of the previous one. It is a
 control message, not a teardown.
+
+### Revisits
+
+A frequency this scanner has already submitted a DX spot from is worth another
+look — a net or a pile-up keeps producing callsigns — but the likeliest outcome
+is hearing the station already spotted. So a revisit within
+`--revisit-dwell-period` (15 minutes) gets `--revisit-dwell-percent` of the
+normal time: 50% by default, which on the defaults means a 15 s base dwell, a
+30 s ceiling and a 5 s silence timeout instead of 30/60/10.
+
+Every timing scales together, including the extension. Shortening only the base
+dwell would leave the ceiling and the silence timeout to undo it — a frequency
+producing unvalidated candidates would extend right back up to the full ceiling.
+
+Set `--revisit-dwell-percent 1.0` to treat revisits like anything else. Values
+of 0 or above 1 are rejected rather than clamped: 0 means never listening to a
+revisit at all, and above 1 makes a "reduced" dwell longer than a normal one,
+so either is far more likely to be a typo than an intention.
+
+This is **not** `--revisit-cooldown`, which decides whether a frequency may be
+visited *at all*. This decides how long, once it is. The spot history is keyed
+on frequency rather than callsign — what matters is that the frequency has been
+productive, not who was on it — and shares the same frequency bucketing as the
+spot cooldown, so normal dial drift still counts as the same frequency.
 
 ### Rotation
 

@@ -188,6 +188,9 @@ class SpotThrottle:
         # only needs to be approximately right.)
         self._bucket_hz = max(1, freq_tolerance_hz * 2)
         self._last_spot: "OrderedDict[Tuple[str, int], float]" = OrderedDict()
+        # Last spot per frequency bucket, whatever the callsign — see
+        # seconds_since_spot_on. Bounded the same way as the rest.
+        self._last_freq_spot: "OrderedDict[int, float]" = OrderedDict()
         # Validated decodes per (callsign, frequency) — see record_hit.
         # Bounded the same way, so a long run cannot grow it unboundedly.
         self._hits: "OrderedDict[Tuple[str, int], int]" = OrderedDict()
@@ -250,11 +253,36 @@ class SpotThrottle:
 
     def record(self, callsign: str, freq_hz: int) -> None:
         key = self._key(callsign, freq_hz)
+        bucket = self.bucket_freq(freq_hz)
+        now = time.time()
         with self._lock:
             self._last_spot.pop(key, None)  # drop-then-add moves it to the end
-            self._last_spot[key] = time.time()
+            self._last_spot[key] = now
             while len(self._last_spot) > self.max_entries:
                 self._last_spot.popitem(last=False)  # evict the oldest
+
+            # Also by frequency alone, ignoring which callsign it was. The
+            # scanner uses this to shorten a revisit to a frequency it has
+            # already produced a spot from — see --revisit-dwell-percent. A
+            # separate map rather than scanning _last_spot for a matching
+            # bucket: this is read once per dwell and the scan would be
+            # O(max_entries) every time.
+            self._last_freq_spot.pop(bucket, None)
+            self._last_freq_spot[bucket] = now
+            while len(self._last_freq_spot) > self.max_entries:
+                self._last_freq_spot.popitem(last=False)
+
+    def seconds_since_spot_on(self, freq_hz: int) -> Optional[float]:
+        """
+        How long since ANY callsign was spotted on this frequency, or None if
+        none ever was. Uses the same frequency bucketing as everything else
+        here, so the detector's estimate drifting a few Hz still counts as the
+        same frequency.
+        """
+        bucket = self.bucket_freq(freq_hz)
+        with self._lock:
+            last = self._last_freq_spot.get(bucket)
+        return None if last is None else max(0.0, time.time() - last)
 
     def __len__(self) -> int:
         with self._lock:
