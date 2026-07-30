@@ -12,6 +12,27 @@ The real output is a JSONL log — one record per candidate, with the raw
 transcript that produced it. That file is what tells you whether the approach
 works on your bands and conditions.
 
+## What the UberSDR instance must have
+
+This is a client. It does none of the signal processing itself, so the instance
+it points at has to provide all of it:
+
+| Needed | For | Without it |
+|---|---|---|
+| **Whisper enabled** (`whisper.enabled: true`, with a reachable `whisper.server_url`) | Transcription — the entire input to this tool | Nothing works at all |
+| **Lookup services enabled** (`lookup_services.enabled: true`) | Validating extracted callsigns against QRZ | Every candidate stays unvalidated, so nothing is ever confirmed |
+| **Noise floor monitoring** (`noisefloor.enabled: true`) | The voice activity feed this hops around | No targets, nothing to scan |
+| **The `dxcluster` addon installed** | Submitting DX spots, via `/addon/dxcluster/api/terminal` | The scan still runs and confirms callsigns, but `--spot` cannot submit anything |
+
+The first three are mandatory. The DX cluster addon is only needed if you want
+spots submitted — which for most people is the point, so it is listed here
+rather than buried in the spotting section. Note the revisit settings depend on
+it too: they trigger on a spot this scanner submitted, so with no cluster they
+never fire (see [Revisits](#revisits)).
+
+Run `scanner.py --check` against the instance to have all of this verified for
+you before you start — see [Check the instance first](#2-check-the-instance-first).
+
 ---
 
 ## 1. Install
@@ -57,6 +78,7 @@ still let a scan run, and the output tells you which flags to add.
 | `lookup_services.enabled: true` | QRZ validation — without it there is nothing to check against |
 | `noisefloor.enabled: true` | Voice activity detection, i.e. somewhere to hop |
 | `whisper.allow_client_params: true` | The tuned recognition parameters. Optional — see below |
+| The `dxcluster` addon installed | Submitting DX spots. Only needed with `--spot`; the scan itself runs without it |
 
 ## 3. Run it
 
@@ -399,25 +421,93 @@ config to add in UberSDR's Admin UI (`Host: voiceskimmer`, `Port: 6098`,
 
 ### Environment variables
 
-Every `scanner.py` flag has an environment-variable equivalent (see
-`entrypoint.sh` for the complete, current list). The commonly-used ones:
+Every variable `entrypoint.sh` accepts. All are optional and all are commented
+out in `docker-compose.yml` — an unset variable means the flag is not passed and
+`scanner.py`'s own default applies.
 
-| Variable | CLI flag | Default |
-|---|---|---|
-| `UBERSDR_HOST` / `UBERSDR_PORT` / `UBERSDR_SSL` / `UBERSDR_PASS` | `--host`/`--port`/`--ssl`/`--password` | `ubersdr` / `8080` / off / — |
-| `BAND` | `--band` | all bands |
-| `DWELL` / `MAX_DWELL` | `--dwell`/`--max-dwell` | `30` / `60` |
-| `REVISIT_DWELL_PERIOD` / `REVISIT_DWELL_PERCENT` | `--revisit-dwell-period`/`--revisit-dwell-percent` | `900` / `0.50` |
-| `MIN_SNR` / `MIN_CONFIDENCE` | `--min-snr`/`--min-confidence` | `20` / `0.7` |
-| `LOCK_FREQ` / `LOCK_MODE` | `--lock-freq`/`--lock-mode` | — (hop normally) |
-| `STOCK_WHISPER` | `--stock-whisper` | off |
-| `SPOT` / `SPOTTER_CALL` / `SPOTTER_PASS` | `--spot`/`--spotter-call`/`--spotter-pass` | off / — / — |
-| `SPOT_MIN_HITS` | `--spot-min-hits` | `2` |
-| `PARALLEL` | `--parallel` | `1` (see below) |
-| `SPOT_TAG` | `--spot-tag` | `[Voice]` |
-| `WEB_PORT` | `--web-port` | `6098` (`0` disables) |
-| `OUTPUT` | `--output` | `/data/detections.jsonl` (persisted via the `voiceskimmer_data` bind mount) |
-| `EXTRA_ARGS` | appended verbatim | — |
+
+**Connection**
+
+| Variable | CLI flag | Default | Notes |
+|---|---|---|---|
+| `UBERSDR_HOST` | `--host` | `ubersdr` | set in docker-compose.yml |
+| `UBERSDR_PORT` | `--port` | `8080` |  |
+| `UBERSDR_SSL` | `--ssl` | off | set to `1` for https/wss |
+| `UBERSDR_PASS` | `--password` | — |  |
+
+**What to scan**
+
+| Variable | CLI flag | Default | Notes |
+|---|---|---|---|
+| `BAND` | `--band` | — |  |
+| `PARALLEL` | `--parallel` | `1` | each worker holds a Whisper slot; server default is 2 |
+| `LOCK_FREQ` | `--lock-freq` | — | Hz; pins one frequency (forces `PARALLEL` to 1) |
+| `LOCK_MODE` | `--lock-mode` | `usb` |  |
+
+**Dwell timing — seconds**
+
+| Variable | CLI flag | Default | Notes |
+|---|---|---|---|
+| `DWELL` | `--dwell` | `30.0` |  |
+| `MAX_DWELL` | `--max-dwell` | `60.0` | ceiling; below `DWELL` truncates the base dwell |
+| `DWELL_EXTENSION` | `--dwell-extension` | `30.0` |  |
+| `REVISIT_COOLDOWN` | `--revisit-cooldown` | `120.0` |  |
+| `REVISIT_DWELL_PERIOD` | `--revisit-dwell-period` | `900.0` | needs `SPOT` enabled to have any effect |
+| `REVISIT_DWELL_PERCENT` | `--revisit-dwell-percent` | `0.5` | fraction, **not** seconds; 0 < x ≤ 1 |
+
+**Which signals to bother with**
+
+| Variable | CLI flag | Default | Notes |
+|---|---|---|---|
+| `MIN_SNR` | `--min-snr` | `20.0` | per-channel dB, from the activity feed |
+| `MIN_CONFIDENCE` | `--min-confidence` | `0.7` |  |
+| `SILENCE_MIN_SNR` | `--silence-min-snr` | `40.0` | power vs noise **density** — a different scale to `MIN_SNR` |
+| `SILENCE_TIMEOUT` | `--silence-timeout` | `10.0` |  |
+| `SILENCE_MIN_WORDS` | `--silence-min-words` | `4` | fallback when the server sends no signal data |
+
+**Transcription**
+
+| Variable | CLI flag | Default | Notes |
+|---|---|---|---|
+| `STOCK_WHISPER` | `--stock-whisper` | off | set to `1` to send no recognition parameters |
+| `ASR_LANGUAGE` | `--asr-language` | `en` |  |
+| `PROMPT` | `--prompt` | built-in phonetics prompt | custom Whisper initial prompt |
+
+**Extraction and lookup**
+
+| Variable | CLI flag | Default | Notes |
+|---|---|---|---|
+| `MIN_EXTRACT_CONFIDENCE` | `--min-extract-confidence` | `0.4` | 0–1; raise for precision, lower for recall |
+| `MIN_CALLSIGN_LENGTH` | `--min-callsign-length` | `4` | characters; gates the QRZ lookup, not just spotting |
+| `LOOKUP_INTERVAL` | `--lookup-interval` | `0.0` | set to `6` if not on a bypassed IP |
+
+**DX cluster spotting — needs the `dxcluster` addon**
+
+| Variable | CLI flag | Default | Notes |
+|---|---|---|---|
+| `SPOT` | `--spot` | off | set to `1` to submit spots |
+| `SPOTTER_CALL` | `--spotter-call` | — | required with `SPOT` |
+| `SPOTTER_PASS` | `--spotter-pass` | — | required with `SPOT` |
+| `SPOT_TAG` | `--spot-tag` | `[Voice]` |  |
+| `SPOT_COOLDOWN` | `--spot-cooldown` | — |  |
+| `SPOT_FREQ_TOLERANCE` | `--spot-freq-tolerance` | `500` | Hz; governs hit matching and the re-spot cooldown |
+| `SPOT_MIN_HITS` | `--spot-min-hits` | `2` |  |
+| `SPOT_MIN_LENGTH` | `--min-callsign-length` | — | former name for `MIN_CALLSIGN_LENGTH`; still accepted |
+
+**Output**
+
+| Variable | CLI flag | Default | Notes |
+|---|---|---|---|
+| `WEB_PORT` | `--web-port` | `6098` | `0` disables the dashboard |
+| `OUTPUT` | `--output` | `/data/detections.jsonl` | persisted via the bind mount |
+| `PROGRESS_INTERVAL` | `--progress-interval` | `300.0` | seconds between progress lines |
+| `VERBOSE` | `--verbose` | off | set to `1` for per-segment logging |
+| `EXTRA_ARGS` | (appended verbatim) | — | extra scanner.py args, appended verbatim |
+
+A handful of internals have no variable of their own — `--max-candidates`,
+`--no-prefilter`, `--pipeline-latency`, `--segment-join-gap`,
+`--spot-max-entries` and `--web-host`. Pass them through `EXTRA_ARGS` if you
+ever need them.
 
 ### Building the image yourself
 
