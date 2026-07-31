@@ -24,6 +24,8 @@ from phonetics import (
     is_callsign_shaped,
     is_lookupable,
     normalise_callsign,
+    split_at_digit,
+    supersedes,
     tokenise,
 )
 
@@ -928,6 +930,77 @@ class TestExplain(unittest.TestCase):
                 c.callsign for c in extract_phonetic(tokens, cues, trace=[])
             ]
             self.assertEqual(untraced, traced, text)
+
+
+class TestSplitAtDigit(unittest.TestCase):
+    def test_splits_on_the_last_digit_not_the_first(self):
+        # 2E0AAA is a UK callsign whose prefix is 2E0. Splitting on the
+        # leading "2" would make the suffix E0AAA and every comparison wrong.
+        self.assertEqual(split_at_digit("2E0AAA"), ("2E0", "AAA"))
+
+    def test_ordinary_prefixes(self):
+        self.assertEqual(split_at_digit("ON2GBR"), ("ON2", "GBR"))
+        self.assertEqual(split_at_digit("G4RS"), ("G4", "RS"))
+
+    def test_no_digit_is_not_a_callsign_shape(self):
+        self.assertIsNone(split_at_digit("HELLO"))
+
+
+class TestSupersedes(unittest.TestCase):
+    """
+    A dropped phonetic word costs exactly one character, wherever in the run
+    it fell — see the live miss: ON2GB confirmed on a frequency, then the real
+    station ON2GBR on the same frequency minutes later.
+    """
+
+    def test_recovers_the_live_miss(self):
+        self.assertTrue(supersedes("ON2GBR", "ON2GB"))
+
+    def test_interior_drop(self):
+        # The word lost was mid-callsign, not at either end. This is what
+        # separates the rule from dx_boundary_correction's substring test.
+        self.assertTrue(supersedes("ON2GBR", "ON2BR"))
+        self.assertTrue(supersedes("ON2GBR", "ON2GR"))
+
+    def test_two_drops_allowed(self):
+        self.assertTrue(supersedes("ON2GBR", "ON2B"))
+
+    def test_three_drops_rejected(self):
+        # Losing three words from one callsign is rare enough that a match is
+        # likelier to be coincidence than corruption.
+        self.assertFalse(supersedes("ON2GBRX", "ON2B"))
+
+    def test_substitution_is_not_a_drop(self):
+        # ON2DBR vs ON2GB was the original (mis-)report: the middle character
+        # differs, so this is not one station decoded twice.
+        self.assertFalse(supersedes("ON2DBR", "ON2GB"))
+
+    def test_order_must_be_preserved(self):
+        self.assertFalse(supersedes("ON2GBR", "ON2RG"))
+
+    def test_different_prefix_is_a_different_station(self):
+        # Dropping a character from the prefix changes the country outright:
+        # a Belgian station would become an American one.
+        self.assertFalse(supersedes("ON2GBR", "N2GBR"))
+
+    def test_different_digit_is_a_different_station(self):
+        self.assertFalse(supersedes("ON2GBR", "ON4GB"))
+
+    def test_identical_callsigns_do_not_supersede(self):
+        self.assertFalse(supersedes("ON2GBR", "ON2GBR"))
+
+    def test_bare_prefix_is_not_superseded(self):
+        # What is left is not a callsign, so it is not evidence of anything.
+        self.assertFalse(supersedes("ON2GB", "ON2"))
+
+    def test_wrong_way_round_is_not_a_match(self):
+        # The caller is responsible for argument order; a shorter callsign
+        # never supersedes a longer one.
+        self.assertFalse(supersedes("ON2GB", "ON2GBR"))
+
+    def test_empty_inputs(self):
+        self.assertFalse(supersedes("", "ON2GB"))
+        self.assertFalse(supersedes("ON2GBR", ""))
 
 
 if __name__ == "__main__":

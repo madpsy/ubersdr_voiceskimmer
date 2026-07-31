@@ -1230,3 +1230,96 @@ def dx_boundary_correction(normalised: str, dx_callsign: str) -> Optional[str]:
     if normalised not in dx_norm:
         return None
     return dx_norm
+
+
+# Supersession: a longer callsign that subsumes a shorter one ----------------
+#
+# Distinct from dx_boundary_correction above, which repairs a decode against a
+# trusted, manually-entered DX spot. This has no external truth to lean on:
+# both callsigns came out of the same pipeline and both passed QRZ, so the
+# only evidence is their shape and the fact that they turned up on the same
+# frequency minutes apart.
+#
+# The failure mode being modelled is a dropped phonetic word. One ITU word
+# maps to exactly one character, so a word Whisper never transcribed costs
+# exactly one character — and unlike a hop-straddle clip (which can only bite
+# at the ends, hence dx_boundary_correction's substring test) a word lost to
+# fast or quiet speech can sit anywhere in the run. So the shorter callsign
+# must be a SUBSEQUENCE of the longer, not a substring:
+#
+#     ON2GBR heard as ON2GB   trailing R never transcribed
+#     ON2GBR heard as ON2BR   interior G never transcribed
+#
+# Two constraints keep that from over-matching:
+#
+#   1. The prefix through the last digit must be identical. A dropped
+#      character there changes the country outright (ON2GBR -> N2GBR turns a
+#      Belgian station into an American one), and those are unambiguously two
+#      different stations rather than two decodes of one.
+#   2. At most SUPERSEDE_MAX_DROPPED characters may go missing. Losing three
+#      words from one callsign is rare enough that the match is likelier to be
+#      coincidence than corruption.
+#
+# Even so this can still align two genuinely different stations — ON4AB and
+# ON4KAB are both plausible real calls that could share a frequency during a
+# QSO. The string test is deliberately NOT the only safeguard; see
+# SupersessionTracker in dxcluster.py, where corroboration counts decide
+# whether a match is allowed to act.
+SUPERSEDE_MAX_DROPPED = 2
+
+
+def split_at_digit(call: str) -> Optional[Tuple[str, str]]:
+    """
+    Split a callsign into (prefix-through-last-digit, suffix).
+
+    The last digit rather than the first: 2E0AAA is a UK callsign whose
+    prefix is 2E0, and splitting on the leading "2" would call the prefix "2"
+    and the suffix "E0AAA". Returns None when there is no digit at all, which
+    is not a callsign shape this should be reasoning about.
+    """
+    idx = -1
+    for i, ch in enumerate(call):
+        if ch.isdigit():
+            idx = i
+    if idx < 0:
+        return None
+    return call[:idx + 1], call[idx + 1:]
+
+
+def _is_subsequence(needle: str, haystack: str) -> bool:
+    """True when every character of `needle` appears in `haystack` in order."""
+    it = iter(haystack)
+    return all(ch in it for ch in needle)
+
+
+def supersedes(longer: str, shorter: str) -> bool:
+    """
+    True when `shorter` looks like `longer` with up to SUPERSEDE_MAX_DROPPED
+    characters lost from the suffix — i.e. the same station, decoded once with
+    a phonetic word or two missing.
+
+    Both arguments must already be normalised (see normalise_callsign).
+    """
+    if not longer or not shorter or longer == shorter:
+        return False
+
+    long_split = split_at_digit(longer)
+    short_split = split_at_digit(shorter)
+    if long_split is None or short_split is None:
+        return False
+
+    long_prefix, long_suffix = long_split
+    short_prefix, short_suffix = short_split
+    if long_prefix != short_prefix:
+        return False
+
+    # A suffix that vanished entirely is not evidence of anything — the
+    # remainder is a bare prefix, which is not a callsign.
+    if not short_suffix:
+        return False
+
+    dropped = len(long_suffix) - len(short_suffix)
+    if not (0 < dropped <= SUPERSEDE_MAX_DROPPED):
+        return False
+
+    return _is_subsequence(short_suffix, long_suffix)

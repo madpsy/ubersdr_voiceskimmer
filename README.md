@@ -276,6 +276,21 @@ Comments are tagged `<tag> <QRZ name>` (default tag `[Voice]`, truncated to
 the server's 50-character cap) so they're distinguishable from
 manually-submitted or CW-skimmer spots in anyone else's cluster view.
 
+**The connection looks after itself.** A scan runs for hours or days, and
+cluster nodes restart, drop idle sessions and sit behind flaky links, so the
+spotter keeps a background thread that reconnects and re-logs-in for as long
+as the scan lasts — backing off from 5 s to a maximum of 60 s between
+attempts. A node that is down when the scan starts, or that disappears
+halfway through the night, costs you the spots during the outage and nothing
+more: spotting resumes on its own within a minute of it coming back, without
+restarting the scan. Spots attempted while disconnected are logged as skipped
+and are not counted against the cooldown, so the next hearing of that station
+spots it normally.
+
+The one thing it does not retry is a rejected callsign or password — that
+will never start working, so it is reported once and the run continues
+without spotting.
+
 A full roaming scan across every band, with spot submission on:
 
 ```bash
@@ -515,6 +530,14 @@ out in `docker-compose.yml` — an unset variable means the flag is not passed a
 | `SPOT_FREQ_TOLERANCE` | `--spot-freq-tolerance` | `500` | Hz; governs hit matching and the re-spot cooldown |
 | `SPOT_MIN_HITS` | `--spot-min-hits` | `2` |  |
 | `SPOT_MIN_LENGTH` | `--min-callsign-length` | — | former name for `MIN_CALLSIGN_LENGTH`; still accepted |
+
+**Callsign supersession** — see [Supersession](#supersession)
+
+| Variable | CLI flag | Default | Notes |
+|---|---|---|---|
+| `SUPERSEDE` | `--no-supersede` | on | set to `0` to disable retiring a shorter callsign when a longer one containing it is confirmed on the same frequency |
+| `SUPERSEDE_WINDOW` | `--supersede-window` | `900` | seconds; how close the two hearings must be, and how long the retirement lasts |
+| `SUPERSEDE_OBSERVE_ONLY` | `--supersede-observe-only` | off | set to `1` to record supersession without suppressing anything |
 
 **Output**
 
@@ -799,6 +822,70 @@ Before a lookup is spent, a candidate must pass, in order:
 CTY is used **only** as a negative filter. It resolves by longest-prefix match,
 so it returns "United Kingdom" for `G4ZZZZ` whether or not that station is
 licensed — a CTY hit proves nothing, only a miss is informative.
+
+### Supersession
+
+QRZ cannot catch every mis-decode, because some mis-decodes are themselves
+real callsigns. One ITU phonetic word maps to exactly one character, so a word
+Whisper never transcribed costs exactly one character — and what is left is
+often a licensed station that QRZ happily confirms. Observed live as `ON2GB`,
+with the real station `ON2GBR` arriving on the same frequency a couple of
+minutes later.
+
+So when a **longer** callsign is confirmed on the same frequency inside
+`--supersede-window` (15 minutes by default), and the shorter one is that
+callsign with up to two characters missing, the shorter is retired: no further
+hits, no announcement, no spot. Its accumulated hits move onto the longer
+callsign, since those hearings were of the same station — a station heard
+three times, twice with a character missing, still reaches `--spot-min-hits`.
+
+**Only ever the shorter of the pair is retired**, whichever order they are
+heard in. A missing phonetic word is far likelier than an invented one, so
+length decides and arrival order does not: if the longer callsign was already
+on record, a shorter one is retired the moment it arrives rather than waiting
+to be heard again.
+
+The shape test is deliberately narrow. The shorter callsign must be a
+**subsequence** of the longer — characters only ever dropped, never
+substituted — and the prefix through the last digit must be identical, since
+dropping a character there changes the country outright (`ON2GBR` → `N2GBR`
+turns a Belgian station into an American one).
+
+| Heard first | then | Result |
+|---|---|---|
+| `ON2GB` | `ON2GBR` | retired — trailing character lost |
+| `ON2BR` | `ON2GBR` | retired — interior character lost |
+| `ON2DBR` | `ON2GBR` | untouched — a character *differs*, not missing |
+| `N2GBR` | `ON2GBR` | untouched — different prefix, different country |
+
+Even so, `ON4AB` and `ON4KAB` are both plausible real callsigns that could
+share a frequency during a QSO, so the string test is not allowed to act
+alone. Two corroboration guards sit in front of it:
+
+- the longer callsign must have been heard **at least as often** as the
+  shorter. This blocks the inverse error, which is real: a word following the
+  callsign can be absorbed as a trailing letter — *"ON2GB, radio check"* can
+  yield `ON2GBR`, since "radio" maps to `R`. One decode cannot retire a
+  station heard four times.
+- a shorter callsign that has already reached `--spot-min-hits` is left alone.
+  Something that corroborated has stopped looking like a one-pass garble.
+
+Retirement expires with the window rather than lasting the run: a callsign
+still being heard 15 minutes later is behaving like a real station.
+
+Every supersession is recorded as `superseded_by` in the JSONL and marked on
+the dashboard (`!` on the retired callsign, `+` on the one that replaced it,
+both with an explanation on hover) — a wrongly-retired station would otherwise
+be invisible by construction. `--supersede-observe-only` records all of that
+without suppressing anything, which is worth running for a few days before
+trusting the rule on your own bands.
+
+**Note on timing.** With the default `--spot-min-hits 2`, a shorter callsign
+often reaches two hearings and is spotted within its dwell, minutes before the
+longer version is ever heard. Supersession cannot retract a spot already sent
+— it blocks the re-spot after `--spot-cooldown`, cleans up the confirmed list,
+and carries the corroboration across. Preventing the first spot outright would
+need spots held back for a settling period, which is not implemented.
 
 ---
 

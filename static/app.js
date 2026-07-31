@@ -1387,6 +1387,20 @@
   // -- Confirmed callsigns table --------------------------------------------
 
   function renderConfirmedRow(det) {
+    // Supersession belongs to the row, not to any one detection, so it has
+    // to survive a later hearing replacing the object. Without this a clean
+    // decode of the superseding callsign (which carries superseded_by "" and
+    // no supersedes list at all) silently wipes the marker off the row that
+    // had just earned it. The server keeps the same state on its own copy —
+    // see WebUI.push_confirmed — so a reload was already correct; this is
+    // the live table catching up.
+    const prev = confirmed.get(det.key);
+    if (prev) {
+      if (!det.superseded_by && prev.superseded_by) {
+        det.superseded_by = prev.superseded_by;
+      }
+      if (!det.supersedes && prev.supersedes) det.supersedes = prev.supersedes;
+    }
     confirmed.set(det.key, det);
     redrawConfirmed();
     scheduleMapRedraw();
@@ -1401,6 +1415,9 @@
       matches(
         haystack([
           d.normalised, d.band, d.mode, d.name, d.country,
+          // So "superseded" in the filter box lists exactly the rows the
+          // supersession rule has acted on — the quickest way to audit it.
+          d.superseded_by ? `superseded ${d.superseded_by}` : "",
           ...freqTerms(d.frequency),
         ]),
         query
@@ -1417,14 +1434,34 @@
     els.confirmedBody.innerHTML = rows
       .map((d) => {
         const star = d.agrees_with_dx_spot ? '<span class="star">★</span> ' : "";
+        // Supersession markers. Deliberately quiet — a glyph in the call cell
+        // rather than a column, since most rows have neither — but each one
+        // carries the explanation on hover, because "!" on a callsign is not
+        // self-explanatory and the consequence (dormant, never spotted again)
+        // is not something to leave the reader guessing at.
+        let sup = "";
+        if (d.superseded_by) {
+          sup =
+            `<span class="mark superseded" title="Looks like ${escAttr(
+              d.superseded_by
+            )} with a character missing — same frequency, minutes apart.` +
+            ` Dormant: not counted or spotted again.">!</span> `;
+        } else if (d.supersedes && d.supersedes.length) {
+          sup =
+            `<span class="mark supersedes" title="Longer form of ${escAttr(
+              d.supersedes.join(", ")
+            )}, which was decoded with a character missing.` +
+            ` This is the corrected callsign.">+</span> `;
+        }
         let spotted = '<span class="badge no">no</span>';
         if (d.spotted_at) {
           spotted = '<span class="badge spotted">spotted</span>';
         }
+        const dim = d.superseded_by ? " superseded-row" : "";
         return (
-          `<tr class="${bandClass(d.band)}" data-key="${escAttr(d.key)}"` +
+          `<tr class="${bandClass(d.band)}${dim}" data-key="${escAttr(d.key)}"` +
           ` data-freq="${d.frequency}" data-mode="${escAttr(d.mode || "")}">` +
-          `<td class="call">${star}${flagHTML(d.country_code, d.country)}` +
+          `<td class="call">${sup}${star}${flagHTML(d.country_code, d.country)}` +
           `${esc(d.normalised)}</td>` +
           `<td>${esc(d.band)}</td><td>${fmtFreq(d.frequency)}</td>` +
           `<td>${esc((d.mode || "").toUpperCase())}</td>` +
@@ -1450,6 +1487,29 @@
     redrawConfirmed();
     // The marker moves from the Confirmed layer to the Spotted one.
     scheduleMapRedraw();
+  }
+
+  // A longer callsign retiring a shorter one touches TWO rows — the shorter
+  // gets the "!" and the longer gets the "+" — and the shorter one may not
+  // have a row at all if it was retired before it was ever announced. Both
+  // updates are best-effort for that reason; the server holds the canonical
+  // state either way, so a reload is always correct.
+  function markSuperseded(ev) {
+    let changed = false;
+    const shorter = confirmed.get(ev.key);
+    if (shorter && shorter.superseded_by !== ev.longer) {
+      shorter.superseded_by = ev.longer;
+      changed = true;
+    }
+    const longer = confirmed.get(ev.longer_key);
+    if (longer) {
+      const list = longer.supersedes || (longer.supersedes = []);
+      if (!list.includes(ev.shorter)) {
+        list.push(ev.shorter);
+        changed = true;
+      }
+    }
+    if (changed) redrawConfirmed();
   }
 
   function renderSpotRow(spot) {
@@ -1667,6 +1727,7 @@
       markSpotted(spot);
       scheduleChartRefresh();
     });
+    es.addEventListener("superseded", (e) => markSuperseded(JSON.parse(e.data)));
     es.addEventListener("stats", (e) => renderStats(JSON.parse(e.data)));
     es.addEventListener("targets", (e) => renderTargets(JSON.parse(e.data)));
     es.addEventListener("signal", (e) => renderSignal(JSON.parse(e.data)));

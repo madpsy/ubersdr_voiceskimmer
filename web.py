@@ -1060,9 +1060,52 @@ class WebUI:
             entry["hit_count"] = (existing["hit_count"] + 1) if existing else 1
             entry["is_repeat"] = is_repeat
             entry["spotted_at"] = existing.get("spotted_at") if existing else None
+            # Supersession is a property of the row, not of any one detection,
+            # so it has to survive a later hearing rebuilding the entry from a
+            # fresh Detection. Without this a clean decode of the superseding
+            # callsign (superseded_by "") would wipe the marker off the row it
+            # had just earned.
+            if existing:
+                entry["supersedes"] = existing.get("supersedes") or []
+                entry["superseded_by"] = (
+                    detection.get("superseded_by")
+                    or existing.get("superseded_by")
+                    or ""
+                )
+            else:
+                entry["supersedes"] = []
+                entry["superseded_by"] = detection.get("superseded_by") or ""
             self._confirmed[key] = entry
             self._record_history("confirmed", entry.get("band", ""), call)
         self._broadcast("confirmed", entry)
+
+    def push_superseded(
+        self, shorter: str, longer: str, freq_bucket: int
+    ) -> None:
+        """
+        Mark a confirmed callsign as retired by a longer one on the same
+        frequency — see SupersessionTracker.
+
+        Broadcast even when the shorter callsign has no confirmed row of its
+        own (it can be retired before it was ever announced, or the row can
+        have aged out), because the event also tells the dashboard which
+        callsign did the superseding, and that row is the one carrying the
+        "+" marker.
+        """
+        shorter_key = f"{shorter}|{freq_bucket}"
+        longer_key = f"{longer}|{freq_bucket}"
+        entry = {
+            "time": time.time(), "shorter": shorter, "longer": longer,
+            "key": shorter_key, "longer_key": longer_key,
+        }
+        with self._lock:
+            if shorter_key in self._confirmed:
+                self._confirmed[shorter_key]["superseded_by"] = longer
+            if longer_key in self._confirmed:
+                existing = self._confirmed[longer_key].get("supersedes") or []
+                if shorter not in existing:
+                    self._confirmed[longer_key]["supersedes"] = existing + [shorter]
+        self._broadcast("superseded", entry)
 
     def push_spot(
         self, callsign: str, freq: int, comment: str, freq_bucket: int,

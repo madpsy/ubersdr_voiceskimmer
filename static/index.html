@@ -616,6 +616,25 @@
   .badge.spotted { background: #113a1e; color: var(--good); }
   .badge.cooldown { background: #3a2f10; color: var(--warn); }
   .badge.no { background: #21262d; color: var(--dim); }
+
+  /* Supersession markers in the call cell: "!" on the callsign that was
+     decoded with a character missing, "+" on the longer one that corrected
+     it. Both carry a title, so the cursor is a help pointer rather than the
+     default — the glyphs are only meant to prompt the hover. */
+  .mark {
+    font-weight: 700;
+    cursor: help;
+    border-bottom: 1px dotted currentColor;
+  }
+  .mark.superseded { color: var(--warn); }
+  .mark.supersedes { color: var(--good); }
+  /* Dimmed rather than hidden: a retired callsign is still evidence of what
+     was heard, and hiding it would make the rule impossible to check. The
+     call cell keeps full opacity — nesting opacity would multiply and take
+     the marker down with it — and is dimmed by colour instead. */
+  tr.superseded-row td { opacity: .55; }
+  tr.superseded-row td.call { opacity: 1; color: var(--dim); }
+  tr.superseded-row td.call .mark { color: var(--warn); }
   .empty-row td { color: var(--dim); font-style: italic; }
 
   #spots-panel .scroll, #targets-panel .scroll { max-height: 32vh; }

@@ -268,7 +268,7 @@ const HOOK =
   " renderTargets, appendTranscript, setLiveTranscript, redrawConfirmed," +
   " redrawSpots, bandClass, mapStations, tooltipHTML, countryFlag," +
   " flagHTML, panels, els, startRowAudio, stopRowAudio, buildChart, buildTopChart," +
-  " bandColour, bandClass, renderSettings };\n})();\n";
+  " bandColour, bandClass, renderSettings, markSuperseded };\n})();\n";
 const patched = src.replace(/\n\}\)\(\);\s*$/, HOOK);
 assert.notStrictEqual(patched, src, "could not find the IIFE close in app.js");
 
@@ -530,6 +530,59 @@ check("transcript scrollback is capped per panel", () => {
   }
   const finals = p.transcript.children.filter((c) => c.className.includes("final"));
   assert.ok(finals.length <= 200, `kept ${finals.length} lines, expected <= 200`);
+});
+
+check("supersession marks both rows and dims the retired one", () => {
+  // ON2GB decoded with a character missing, then the real ON2GBR on the same
+  // frequency. The retired row gets "!", the corrected one "+", and both
+  // explain themselves on hover.
+  for (const call of ["ON2GB", "ON2GBR"]) {
+    T.renderConfirmedRow({
+      key: `${call}|14226000`, normalised: call, band: "20m",
+      frequency: 14226000, mode: "usb", name: "", country: "Belgium",
+      country_code: "BE", timestamp: 3, first_seen: 3, hit_count: 1,
+    });
+  }
+  T.markSuperseded({
+    shorter: "ON2GB", longer: "ON2GBR",
+    key: "ON2GB|14226000", longer_key: "ON2GBR|14226000",
+  });
+  byId["confirmed-filter"].value = "";
+  T.redrawConfirmed();
+  const html = T.els.confirmedBody.innerHTML;
+
+  assert.ok(html.includes('class="mark superseded"'), "no ! on the retired row");
+  assert.ok(html.includes('class="mark supersedes"'), "no + on the corrected row");
+  assert.ok(html.includes("superseded-row"), "retired row not dimmed");
+  // Both markers are meaningless without the hover text.
+  assert.ok(/class="mark superseded" title="[^"]+"/.test(html), "! has no tooltip");
+  assert.ok(/class="mark supersedes" title="[^"]+"/.test(html), "+ has no tooltip");
+
+  // Filtering on "superseded" is the quickest way to audit the rule, so the
+  // retired row must match it and the corrected one must not.
+  byId["confirmed-filter"].value = "superseded";
+  T.redrawConfirmed();
+  const filtered = T.els.confirmedBody.innerHTML;
+  assert.ok(filtered.includes("ON2GB<"), "retired row missing from the filter");
+  assert.ok(!filtered.includes("ON2GBR<"), "corrected row should not match");
+  byId["confirmed-filter"].value = "";
+  T.redrawConfirmed();
+});
+
+check("supersession survives a later hearing redrawing the row", () => {
+  // A clean decode of the corrected callsign carries superseded_by "", which
+  // must not wipe the marker the row already earned.
+  T.renderConfirmedRow({
+    key: "ON2GBR|14226000", normalised: "ON2GBR", band: "20m",
+    frequency: 14226000, mode: "usb", name: "", country: "Belgium",
+    country_code: "BE", timestamp: 9, first_seen: 3, hit_count: 2,
+    superseded_by: "",
+  });
+  T.redrawConfirmed();
+  assert.ok(
+    T.els.confirmedBody.innerHTML.includes('class="mark supersedes"'),
+    "the + marker was lost when the row was rebuilt"
+  );
 });
 
 check("filters narrow the tables", () => {

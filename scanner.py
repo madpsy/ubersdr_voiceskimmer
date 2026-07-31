@@ -39,7 +39,7 @@ from phonetics import (
     is_lookupable,
     normalise_callsign,
 )
-from dxcluster import DXClusterSpotter, SpotThrottle
+from dxcluster import DXClusterSpotter, SpotThrottle, SupersessionTracker
 from timeline import FrequencyTimeline
 from ubersdr import Segment, UberSDRSession
 from web import WebUI
@@ -148,6 +148,13 @@ class Detection:
     # the frequency we just hopped to. Kept in the log (not silently dropped)
     # so the false-positive rate is visible, but never announced or spotted.
     suspected_bleed_through: bool = False
+    # Set to the longer callsign that retired this one — the same station
+    # decoded with a phonetic word missing, e.g. ON2GB superseded by ON2GBR
+    # on the same frequency minutes later. See SupersessionTracker. Kept in
+    # the log whether or not the detection was actually suppressed (see
+    # --supersede-observe-only), so the rate can be audited the same way
+    # suspected_bleed_through's can.
+    superseded_by: str = ""
 
 
 class SharedState:
@@ -178,6 +185,18 @@ class SharedState:
             max_entries=args.spot_max_entries,
             freq_tolerance_hz=args.spot_freq_tolerance,
         )
+        # Shared rather than per worker, unlike the bleed-through and
+        # re-hearing guards: those are about one worker re-processing its own
+        # audio, while this is about the same station being decoded twice
+        # minutes apart, which can easily land on different workers.
+        self.supersession: Optional[SupersessionTracker] = (
+            SupersessionTracker(
+                window=args.supersede_window,
+                min_hits=args.spot_min_hits,
+                max_entries=args.spot_max_entries,
+            )
+            if not args.no_supersede else None
+        )
         self.spotter: Optional[DXClusterSpotter] = None
         self.lock = threading.Lock()
         # Keyed (callsign, frequency-bucket) rather than callsign alone: a
@@ -190,7 +209,7 @@ class SharedState:
             "dwells": 0, "segments": 0, "candidates": 0, "malformed": 0,
             "validated": 0, "rejected": 0, "dx_agreements": 0, "straddled": 0,
             "too_short": 0, "qrz_lookups": 0, "debounced": 0,
-            "bleed_through": 0,
+            "bleed_through": 0, "superseded": 0,
         }
 
         self.log_lock = threading.Lock()
@@ -505,16 +524,29 @@ class CallsignScanner:
             )
             if spotter.start():
                 self.shared.spotter = spotter
-            else:
-                # Degrade rather than abort: losing spot submission should
-                # not cost the run its actual job of finding and validating
-                # callsigns. Leaving shared.spotter as None makes
-                # _maybe_spot's early return kick in cleanly instead of
-                # retrying (and warning) for every confirmation.
+            elif spotter.failed_permanently():
+                # Bad callsign or password: no amount of retrying fixes that,
+                # so drop the spotter entirely. Leaving shared.spotter as None
+                # makes _maybe_spot's early return kick in cleanly instead of
+                # warning for every confirmation, for the rest of the run.
+                spotter.stop()
                 log.error(
-                    "DX cluster spot submission unavailable — continuing "
-                    "without it. Confirmed callsigns will still be logged "
-                    "and printed, just not spotted."
+                    "DX cluster credentials rejected — continuing without "
+                    "spot submission. Confirmed callsigns will still be "
+                    "logged and printed, just not spotted."
+                )
+            else:
+                # Not connected *yet*. The spotter supervises its own
+                # connection, so keep it: a cluster that is down or restarting
+                # when the scan begins starts producing spots as soon as it
+                # comes back, without needing the scan restarted. Degrade
+                # rather than abort — losing spot submission should never cost
+                # the run its actual job of finding and validating callsigns.
+                self.shared.spotter = spotter
+                log.error(
+                    "DX cluster not reachable yet — continuing; the "
+                    "connection is retried in the background and spotting "
+                    "starts automatically once it succeeds."
                 )
 
         return True
@@ -1091,7 +1123,14 @@ class CallsignScanner:
                 if len(self._segment_history) > 3:
                     self._segment_history.pop(0)
 
-            validated_count = sum(1 for d in detections if d.validated)
+            # Superseded detections do not count as a validated callsign. They
+            # were suppressed precisely because they are not a new station, so
+            # crediting them would end the dwell early (below) on a decode
+            # nothing was learned from — when the right move is to linger, in
+            # case a repeat produces the longer callsign again.
+            validated_count = sum(
+                1 for d in detections if d.validated and not self._suppressed(d)
+            )
             self.tracker.record_success(target, validated_count)
 
             # Only act on detections for the frequency we are still sitting
@@ -1332,12 +1371,13 @@ class CallsignScanner:
                     )
                 else:
                     self._last_credited[normalised] = (freq_bucket, now)
-                    is_repeat = key in self.confirmed
-                    self.confirmed[key] = detection
-                    self._announce(detection, is_repeat, freq_bucket)
-                    # A station still active after the spot cooldown is
-                    # worth spotting again — see SpotThrottle.
-                    self._maybe_spot(detection)
+                    if not self._superseded(detection, freq_bucket):
+                        is_repeat = key in self.confirmed
+                        self.confirmed[key] = detection
+                        self._announce(detection, is_repeat, freq_bucket)
+                        # A station still active after the spot cooldown is
+                        # worth spotting again — see SpotThrottle.
+                        self._maybe_spot(detection)
             elif result.checked:
                 self.shared.bump("rejected")
                 if self.args.verbose:
@@ -1349,6 +1389,104 @@ class CallsignScanner:
             self._write(detection)
 
         return detections
+
+    def _suppressed(self, detection: Detection) -> bool:
+        """
+        Whether this detection was actually held back by the supersession
+        rule, as opposed to merely flagged by it. Under
+        --supersede-observe-only nothing is held back, so a flagged detection
+        still counts everywhere a normal one would.
+        """
+        return bool(
+            detection.superseded_by and not self.args.supersede_observe_only
+        )
+
+    def _superseded(self, detection: Detection, freq_bucket: int) -> bool:
+        """
+        Apply the longer-callsign supersession rule, and report whether this
+        detection should be dropped.
+
+        Two things happen here. First, if a longer callsign has already
+        retired this one on this frequency, say so — the caller then skips the
+        announcement, the confirmed table and the spot. Second, record this
+        hearing, which may in turn retire shorter callsigns heard earlier.
+
+        Returns True only when the detection is dormant AND enforcement is on.
+        Under --supersede-observe-only the detection is flagged and logged but
+        still counted, which is how you tell whether the rule is firing on
+        genuine mis-decodes before letting it suppress anything.
+        """
+        tracker = self.shared.supersession
+        if tracker is None:
+            return False
+
+        call = detection.normalised
+        superseded_by = tracker.check(call, freq_bucket)
+        if superseded_by:
+            self._note_dormant(detection, superseded_by, freq_bucket, moved=0)
+            if not self.args.supersede_observe_only:
+                # Deliberately not recorded: a dormant callsign must not go on
+                # accumulating hearings, or it would eventually out-weigh the
+                # longer callsign and block it from retiring anything.
+                return True
+
+        result = tracker.record(call, freq_bucket)
+
+        for retired in result.retired:
+            # The retired callsign's corroboration was corroboration of THIS
+            # station, so it comes across — otherwise a station heard three
+            # times, twice with a character missing, could sit below
+            # --spot-min-hits forever. Done before the caller reaches
+            # _maybe_spot, so the transferred hits count towards this very
+            # decision rather than only the next one.
+            moved = self.spot_throttle.transfer_hits(
+                retired, call, detection.frequency
+            )
+            log.info(
+                "   ~ %s supersedes %s on %.3f MHz — %s is now dormant%s",
+                call, retired, detection.frequency / 1e6, retired,
+                f", {moved} hit(s) carried over" if moved else "",
+            )
+            if self.web:
+                self.web.push_superseded(retired, call, freq_bucket)
+
+        if result.dormant_under:
+            # The longer callsign was already on record when this one arrived.
+            # Hits flow the other way here — onto the longer one — and they
+            # include anything just inherited from a shorter callsign above,
+            # so a chain settles on the longest form in one pass.
+            moved = self.spot_throttle.transfer_hits(
+                call, result.dormant_under, detection.frequency
+            )
+            self._note_dormant(
+                detection, result.dormant_under, freq_bucket, moved
+            )
+            if not self.args.supersede_observe_only:
+                return True
+
+        if self.web and detection.superseded_by:
+            self.web.push_superseded(call, detection.superseded_by, freq_bucket)
+        return False
+
+    def _note_dormant(
+        self, detection: Detection, superseded_by: str, freq_bucket: int,
+        moved: int,
+    ) -> None:
+        """Flag, count and announce a detection the rule has retired."""
+        detection.superseded_by = superseded_by
+        self.shared.bump("superseded")
+        log.info(
+            "   ~ %s on %.3f MHz is %s with a character missing — dormant, "
+            "%s%s",
+            detection.normalised, detection.frequency / 1e6, superseded_by,
+            "counted anyway (observe-only)"
+            if self.args.supersede_observe_only else "not counted",
+            f", {moved} hit(s) carried over to {superseded_by}" if moved else "",
+        )
+        if self.web:
+            self.web.push_superseded(
+                detection.normalised, superseded_by, freq_bucket
+            )
 
     def _announce(self, detection: Detection, is_repeat: bool, freq_bucket: int) -> None:
         """
@@ -1548,6 +1686,7 @@ class CallsignScanner:
         print(f"  Matched a DX spot:    {self.stats['dx_agreements']}")
         print(f"  Spanned a hop:        {self.stats['straddled']}")
         print(f"  Suspected bleed-through: {self.stats['bleed_through']}")
+        print(f"  Superseded (longer call): {self.stats['superseded']}")
 
         if self.validator is not None:
             stats = self.validator.stats
@@ -1832,6 +1971,36 @@ def parse_args(argv=None):
                          "is never reset — a station that has proved itself "
                          "does not have to prove it again after the cooldown.")
 
+    sup = parser.add_argument_group("callsign supersession")
+    sup.add_argument("--no-supersede", action="store_true",
+                     help="Disable longer-callsign supersession. By default, a "
+                          "callsign is retired once a longer one containing it "
+                          "(same prefix and digit, up to 2 characters missing "
+                          "from the suffix) is confirmed on the same frequency "
+                          "inside --supersede-window — e.g. ON2GB once ON2GBR "
+                          "is heard. A dropped phonetic word yields a shorter "
+                          "callsign that is often itself real and so passes "
+                          "QRZ, which no amount of validation can catch. The "
+                          "longer callsign must have been heard at least as "
+                          "often, and a shorter one that has already reached "
+                          "--spot-min-hits is left alone. Only ever the "
+                          "shorter of the pair is retired, whichever order "
+                          "they are heard in — a missing phonetic word is far "
+                          "likelier than an invented one.")
+    sup.add_argument("--supersede-window", type=float, default=900.0,
+                     help="Seconds within which a longer callsign may retire "
+                          "a shorter one on the same frequency (default 900s "
+                          "= 15 min). Also how long dormancy lasts: a callsign "
+                          "still being heard after this is behaving like a "
+                          "real station, so it gets another chance.")
+    sup.add_argument("--supersede-observe-only", action="store_true",
+                     help="Detect supersession and record it — superseded_by "
+                          "in the JSONL, a marker on the dashboard — but do "
+                          "not actually suppress anything. Use it to audit "
+                          "what the rule WOULD have retired before trusting "
+                          "it, since a wrongly-retired station is otherwise "
+                          "invisible by construction.")
+
     web = parser.add_argument_group("web ui")
     web.add_argument("--web-port", type=int, default=6098,
                      help="Port for the live dashboard (transcript, confirmed "
@@ -1935,6 +2104,13 @@ def build_settings(args) -> List[Dict[str, Any]]:
             {"label": "Spot max entries", "value": str(args.spot_max_entries)},
             {"label": "Spot tag", "value": args.spot_tag},
             {"label": "Spot min hits", "value": str(args.spot_min_hits)},
+        ]},
+        {"group": "Callsign supersession", "items": [
+            {"label": "Supersede shorter callsigns",
+             "value": "Disabled" if args.no_supersede
+                      else ("Observe only" if args.supersede_observe_only
+                            else "Enabled")},
+            {"label": "Supersede window", "value": f"{args.supersede_window:.0f}s"},
         ]},
         {"group": "Web UI", "items": [
             {"label": "Dashboard port", "value": str(args.web_port) if args.web_port else "Disabled"},

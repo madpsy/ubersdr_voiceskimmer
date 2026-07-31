@@ -202,6 +202,38 @@ services:
       # assembled identically a second time on the same frequency.
       # SPOT_MIN_HITS: "2"
       #
+      # Longer-callsign supersession (ON by default) ----------------------
+      #
+      # A dropped phonetic word costs exactly one character, and what is left
+      # is often a real callsign that QRZ happily confirms — so validation
+      # cannot catch it. Observed live as ON2GB, with the real station ON2GBR
+      # arriving on the same frequency a couple of minutes later.
+      #
+      # When a longer callsign containing a shorter one (same prefix and
+      # digit, up to 2 characters missing from the suffix) is confirmed on
+      # the same frequency inside the window, the shorter one is retired: no
+      # further hits, no announcement, no spot. Its hits move onto the longer
+      # callsign, since those hearings were of the same station — so a station
+      # heard three times, twice with a character missing, still reaches
+      # SPOT_MIN_HITS. Two guards keep this from silencing a real station:
+      # the longer callsign must have been heard at least as often as the
+      # shorter, and a shorter one that has already reached SPOT_MIN_HITS is
+      # left alone.
+      #
+      # Set to 0 to turn the whole thing off.
+      # SUPERSEDE: "1"
+      #
+      # How close in time the two hearings must be, and how long the
+      # retirement then lasts. A callsign still being heard after this is
+      # behaving like a real station, so it gets another chance.
+      # SUPERSEDE_WINDOW: "900"
+      #
+      # Audit mode: detect and record supersession (superseded_by in the
+      # JSONL, markers in the dashboard) without suppressing anything. Worth
+      # a few days before trusting the rule, since a wrongly-retired station
+      # is otherwise invisible by construction.
+      # SUPERSEDE_OBSERVE_ONLY: "1"
+      #
       # Dashboard port (0 disables it)
       # WEB_PORT: "6098"
       #

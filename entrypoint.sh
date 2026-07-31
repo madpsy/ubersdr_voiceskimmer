@@ -64,6 +64,15 @@
 #                         to be looked up at all (default: 4)
 #   SPOT_MIN_HITS         Decodes of the same callsign on the same frequency
 #                         required before spotting (default: 2)
+#   SUPERSEDE             Set to 0 to disable longer-callsign supersession.
+#                         On by default: a callsign is retired once a longer
+#                         one containing it (same prefix and digit, up to 2
+#                         characters missing from the suffix) is confirmed on
+#                         the same frequency — e.g. ON2GB once ON2GBR is heard
+#   SUPERSEDE_WINDOW      Seconds within which that may happen, and how long
+#                         the retirement lasts        (default: 900 = 15 min)
+#   SUPERSEDE_OBSERVE_ONLY  Set to 1 to detect and record supersession without
+#                         suppressing anything — audit mode
 #   WEB_PORT              Dashboard port                          (default: 6098, 0 disables)
 #   OUTPUT                JSONL detection log path                (default: /data/detections.jsonl)
 #   VERBOSE               Set to 1 for verbose logging
@@ -113,6 +122,10 @@ args=""
 [ -n "$SPOT_MIN_LENGTH"      ] && args="$args --min-callsign-length $SPOT_MIN_LENGTH"
 [ -n "$MIN_CALLSIGN_LENGTH"  ] && args="$args --min-callsign-length $MIN_CALLSIGN_LENGTH"
 [ -n "$SPOT_MIN_HITS"        ] && args="$args --spot-min-hits $SPOT_MIN_HITS"
+
+[ "$SUPERSEDE" = "0"         ] && args="$args --no-supersede"
+[ -n "$SUPERSEDE_WINDOW"     ] && args="$args --supersede-window $SUPERSEDE_WINDOW"
+[ "$SUPERSEDE_OBSERVE_ONLY" = "1" ] && args="$args --supersede-observe-only"
 
 [ -n "$WEB_PORT"             ] && args="$args --web-port $WEB_PORT"
 
