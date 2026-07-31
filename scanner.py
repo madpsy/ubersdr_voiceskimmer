@@ -440,6 +440,7 @@ class CallsignScanner:
                     "whisper.max_users, or rejecting the recognition "
                     "parameters",
                 )
+                self.web.set_audio_available(self.worker_id, False)
             if attach_kwargs:
                 log.error(
                     "Whisper attach failed. If the server reported that per-attach "
@@ -451,6 +452,14 @@ class CallsignScanner:
                 )
             else:
                 log.error("Whisper attach failed (is whisper.enabled set?)")
+            # The audio session itself came up fine before the Whisper attach
+            # failed — close it rather than abandoning it, or a caller that
+            # retries start() leaks one more UberSDR session every attempt.
+            try:
+                self.session.stop()
+            except Exception:
+                pass
+            self.session = None
             return False
 
         if self.web:
@@ -2018,23 +2027,50 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
+    WORKER_RETRY_DELAY = 30.0
+
+    def run_with_retry(s: "CallsignScanner") -> None:
+        # A failed attach (e.g. whisper.max_users momentarily full because a
+        # stale session hasn't timed out yet) is often transient, so keep
+        # retrying on this worker's own thread instead of giving up for the
+        # rest of the process's life. If --parallel exceeds the server's
+        # actual whisper.max_users capacity this will retry forever without
+        # succeeding — that's a config mismatch to fix (raise max_users, run
+        # as a trusted container, or lower --parallel), not something a
+        # retry loop can paper over.
+        while s._running:
+            if s.start():
+                if parallel > 1:
+                    log.info("Worker %d scanning", s.worker_id)
+                s.run()
+                return
+            log.error(
+                "Worker %d failed to start — retrying in %.0fs",
+                s.worker_id, WORKER_RETRY_DELAY,
+            )
+            deadline = time.time() + WORKER_RETRY_DELAY
+            while s._running and time.time() < deadline:
+                time.sleep(0.5)
+
     threads: List[threading.Thread] = []
     try:
-        for s in scanners:
-            # Sequential start: worker 0 brings up the shared tracker, log
-            # file and cluster login, and each session must register before
-            # the next one opens its sockets.
-            if not s.start():
-                if s.worker_id == 0:
-                    return 1      # the finally block handles cleanup
-                log.error(
-                    "Worker %d failed to start — continuing with %d",
-                    s.worker_id, s.worker_id,
-                )
-                break
-            if parallel > 1:
-                log.info("Worker %d scanning", s.worker_id)
-            t = threading.Thread(target=s.run, name=f"scan-{s.worker_id}")
+        # Worker 0 brings up the shared tracker, log file and cluster login;
+        # every other worker depends on that, so it starts synchronously and
+        # any failure here is fatal to the whole run.
+        if not scanners[0].start():
+            return 1      # the finally block handles cleanup
+        if parallel > 1:
+            log.info("Worker %d scanning", 0)
+        t0 = threading.Thread(target=scanners[0].run, name="scan-0")
+        t0.start()
+        threads.append(t0)
+
+        # Remaining workers start independently — one failing to attach no
+        # longer blocks the others from ever being tried.
+        for s in scanners[1:]:
+            t = threading.Thread(
+                target=run_with_retry, args=(s,), name=f"scan-{s.worker_id}"
+            )
             t.start()
             threads.append(t)
 
