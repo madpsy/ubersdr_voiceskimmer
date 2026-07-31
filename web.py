@@ -1056,7 +1056,7 @@ class WebUI:
             existing = self._confirmed.get(key)
             entry = dict(detection)
             entry["key"] = key
-            entry["first_seen"] = existing["timestamp"] if existing else detection["timestamp"]
+            entry["first_seen"] = existing["first_seen"] if existing else detection["timestamp"]
             entry["hit_count"] = (existing["hit_count"] + 1) if existing else 1
             entry["is_repeat"] = is_repeat
             entry["spotted_at"] = existing.get("spotted_at") if existing else None
