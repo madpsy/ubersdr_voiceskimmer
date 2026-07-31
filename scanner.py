@@ -345,15 +345,23 @@ class CallsignScanner:
         self.stats = self.shared.stats
         self.confirmed = self.shared.confirmed
 
+        # Guards the shared-setup block in start() below so a restart of
+        # worker 0 (see run_with_retry) does not reopen the log file or spin
+        # up a second ActivityTracker SSE thread on top of the still-running
+        # first one.
+        self._shared_setup_done = False
+
     # -- Setup --------------------------------------------------------------
 
     def start(self) -> bool:
-        # Shared setup runs once, on whichever worker starts first.
-        if self.worker_id == 0:
+        # Shared setup runs once, on whichever worker starts first — and only
+        # once ever, even if this worker itself is later restarted.
+        if self.worker_id == 0 and not self._shared_setup_done:
             if self.args.output:
                 self.shared.log_file = open(self.args.output, "a", encoding="utf-8")
                 log.info("Logging detections to %s", self.args.output)
             self.tracker.start()
+            self._shared_setup_done = True
 
         if self.locked_target is not None:
             first = self.locked_target
@@ -2029,21 +2037,42 @@ def main(argv=None) -> int:
 
     WORKER_RETRY_DELAY = 30.0
 
-    def run_with_retry(s: "CallsignScanner") -> None:
-        # A failed attach (e.g. whisper.max_users momentarily full because a
-        # stale session hasn't timed out yet) is often transient, so keep
-        # retrying on this worker's own thread instead of giving up for the
-        # rest of the process's life. If --parallel exceeds the server's
-        # actual whisper.max_users capacity this will retry forever without
-        # succeeding — that's a config mismatch to fix (raise max_users, run
-        # as a trusted container, or lower --parallel), not something a
-        # retry loop can paper over.
+    def run_with_retry(s: "CallsignScanner", already_started: bool = False) -> None:
+        """
+        Keep a worker scanning for the life of the process.
+
+        A failed attach (e.g. whisper.max_users momentarily full because a
+        stale session hasn't timed out yet) is often transient, so keep
+        retrying on this worker's own thread instead of giving up for the
+        rest of the process's life. If --parallel exceeds the server's
+        actual whisper.max_users capacity this will retry forever without
+        succeeding — that's a config mismatch to fix (raise max_users, run
+        as a trusted container, or lower --parallel), not something a retry
+        loop can paper over.
+
+        Also covers run() returning on its own after a successful start —
+        e.g. a dropped session that failed every reconnect attempt — which
+        used to end that worker's thread permanently. `already_started` is
+        for worker 0: main() already called its start() synchronously before
+        spawning this thread (every other worker depends on the shared state
+        it brings up), so the first iteration here must not repeat it — but
+        if worker 0's run() later exits on its own, it is restarted from here
+        just like any other worker.
+        """
+        started = already_started
         while s._running:
-            if s.start():
+            if started or s.start():
+                started = False
                 if parallel > 1:
                     log.info("Worker %d scanning", s.worker_id)
                 s.run()
-                return
+                if not s._running:
+                    return
+                log.warning(
+                    "Worker %d exited its scan loop unexpectedly — restarting",
+                    s.worker_id,
+                )
+                continue
             log.error(
                 "Worker %d failed to start — retrying in %.0fs",
                 s.worker_id, WORKER_RETRY_DELAY,
@@ -2059,9 +2088,9 @@ def main(argv=None) -> int:
         # any failure here is fatal to the whole run.
         if not scanners[0].start():
             return 1      # the finally block handles cleanup
-        if parallel > 1:
-            log.info("Worker %d scanning", 0)
-        t0 = threading.Thread(target=scanners[0].run, name="scan-0")
+        t0 = threading.Thread(
+            target=run_with_retry, args=(scanners[0], True), name="scan-0"
+        )
         t0.start()
         threads.append(t0)
 
