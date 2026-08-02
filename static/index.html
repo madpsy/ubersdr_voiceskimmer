@@ -192,6 +192,13 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    /* Grid items default to min-width:auto, which floors a column at its
+       widest child's min-content width — a nowrap table or a chart canvas
+       Chart.js last sized in pixels. That floor lets a column grow with the
+       window but never shrink back, and the map, sharing the column, is
+       dragged wide with it. Content that cannot fit scrolls (.scroll) or is
+       resized by its own observer (.chart-wrap) instead. */
+    min-width: 0;
   }
   section.panel h2 {
     font-size: 12px;
@@ -305,6 +312,9 @@
 
   .scroll {
     overflow-y: auto;
+    /* The tables inside are nowrap and wider than a narrow window; they scroll
+       sideways rather than holding the column open. */
+    overflow-x: auto;
     max-height: 42vh;
   }
   /* Show a fixed number of transcript lines, then scroll. Height is derived
@@ -712,6 +722,11 @@
     position: relative;
     height: 220px;
     padding: 8px 10px 4px;
+    /* Chart.js sizes the canvas in pixels and only shrinks it once its
+       ResizeObserver fires, so the wrapper must be free to narrow first
+       (min-width) and must clip the canvas for the frame in between. */
+    min-width: 0;
+    overflow: hidden;
   }
   .chart-legend {
     margin-left: auto;
