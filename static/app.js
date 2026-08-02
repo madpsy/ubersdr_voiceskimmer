@@ -47,6 +47,53 @@
   const SPOTS_MAX_ROWS = 100;
   let startTime = Date.now() / 1000;
 
+  // -- Rolling window -------------------------------------------------------
+
+  // Confirmed rows and submitted spots older than this are not shown. Matches
+  // WebUI.RETENTION_SECONDS, which prunes the same two collections server-side
+  // — this half of it exists because the snapshot only arrives on load and on
+  // reconnect, so a dashboard left open overnight would otherwise still be
+  // showing rows the server has long since dropped.
+  const RETENTION_SECONDS = 24 * 3600;
+  const SWEEP_INTERVAL_MS = 60000;   // an hour-resolution window; a minute is ample
+
+  function fresh(unixSeconds) {
+    return (unixSeconds || 0) >= Date.now() / 1000 - RETENTION_SECONDS;
+  }
+
+  // A detection ages on when it was last heard, not when it was first — a
+  // station active all day is one row that stays, mirroring _prune_locked.
+  function freshDetection(d) {
+    return fresh(d.timestamp || d.first_seen);
+  }
+
+  // Both tables drop their own stale rows rather than one sweep redrawing
+  // everything: on a quiet night neither has anything to do, and a redraw
+  // that touched a table with no expired rows would blow away the selection
+  // in it for nothing.
+  function sweepStale() {
+    let dropped = 0;
+    for (const [key, d] of confirmed) {
+      if (!freshDetection(d)) {
+        confirmed.delete(key);
+        dropped++;
+      }
+    }
+    if (dropped) {
+      redrawConfirmed();
+      scheduleMapRedraw();
+    }
+    // Filtered rather than trimmed from the tail: the array is newest-first
+    // in practice, but nothing enforces that, and a sweep that relied on it
+    // would leave an out-of-order entry on screen forever. A hundred rows
+    // once a minute is not worth being clever about.
+    const live = spots.filter((s) => fresh(s.time));
+    if (live.length !== spots.length) {
+      spots.splice(0, spots.length, ...live);
+      redrawSpots();
+    }
+  }
+
   // -- Row filtering --------------------------------------------------------
 
   // Matched against the same values the row displays, so what you see is what
@@ -1665,8 +1712,14 @@
       renderAudioAvailable(p, !!w.audio_available);
       renderStatus(w.status ? { ...w.status, worker: w.id } : null);
     }
+    // The server prunes the same window before it builds this, so the filters
+    // here are belt and braces against a snapshot that has been in flight
+    // across the boundary — cheap, and the alternative is a row the sweep
+    // would not remove for another minute.
     confirmed.clear();
-    (state.confirmed || []).forEach((d) => confirmed.set(d.key, d));
+    (state.confirmed || [])
+      .filter(freshDetection)
+      .forEach((d) => confirmed.set(d.key, d));
     redrawConfirmed();
     scheduleMapRedraw();
     // Snapshot spots arrive oldest-first and renderSpotRow unshifts each to
@@ -1674,7 +1727,7 @@
     // matching how live spots land. Reversing here as well would flip it back
     // and put the oldest first on every page load.
     spots.length = 0;
-    (state.spots || []).forEach(renderSpotRow);
+    (state.spots || []).filter((s) => fresh(s.time)).forEach(renderSpotRow);
     redrawSpots();
     renderTargets(state.targets);
   }
@@ -1689,8 +1742,11 @@
   loadReceiver();
   loadChart();
   // The window is rolling, so it has to advance on its own — an idle dashboard
-  // would otherwise keep showing an hour axis that ended when it loaded.
+  // would otherwise keep showing an hour axis that ended when it loaded. The
+  // tables age out on the same principle, just on their own beat: the charts
+  // come from the server, these rows are already in the page.
   setInterval(loadChart, 300000);
+  setInterval(sweepStale, SWEEP_INTERVAL_MS);
 
   fetch("api/state")
     .then((r) => r.json())

@@ -3,9 +3,11 @@ Live dashboard for the voice callsign skimmer.
 
 Runs a small Flask app in a background thread inside the same process as
 scanner.py — no separate process or IPC, just another daemon thread alongside
-the existing segment-worker thread. All state here is in-memory and bounded
-(deques with a maxlen); nothing is persisted — the --output JSONL file remains
-the durable record of what was found.
+the existing segment-worker thread. All state here is in-memory and bounded —
+by length (deques with a maxlen) and, for the confirmed sightings and
+submitted spots the dashboard tables draw, by age: RETENTION_SECONDS, the same
+rolling 24 hours the charts use. Nothing is persisted; the --output JSONL file
+remains the durable record of what was found.
 
 Every push_*()/set_current()/update_stats() call comes from scanner.py's
 existing threads (the dwell loop and the segment worker), so all state
@@ -342,6 +344,11 @@ class WebUI:
         # sighting on a given bucket wins, but first_seen/hit_count
         # accumulate across repeats on that bucket, mirroring the on-screen
         # "(repeat)" tracking.
+        #
+        # Both of these are aged out at RETENTION_SECONDS — see
+        # _prune_locked. The deque's maxlen is the second limit on the spot
+        # log: whichever bites first wins, so a busy day shows the last
+        # spots_maxlen submissions and a quiet one shows only today's.
         self._confirmed: Dict[str, Dict[str, Any]] = {}
         self._spots: "deque[Dict[str, Any]]" = deque(maxlen=spots_maxlen)
         # Rolling per-band activity for the dashboard's 24h chart, keyed
@@ -446,7 +453,8 @@ class WebUI:
         @app.route("/api/spots")
         def api_spots():
             """
-            Every confirmed sighting, filtered. Documented in README.md.
+            Every confirmed sighting in the last 24 hours, filtered.
+            Documented in README.md.
 
             Rate limited to one request per second per address, like
             /api/explain: it accepts caller-supplied filters and can return a
@@ -541,6 +549,33 @@ class WebUI:
     HISTORY_BUCKET_SECONDS = 3600
     HISTORY_BUCKETS = 24
 
+    # How long a confirmed sighting or a submitted spot stays visible. Equal
+    # to the chart window by construction rather than by coincidence: a table
+    # holding rows the chart beside it had already aged out was the reason
+    # the two could disagree about what the last day looked like.
+    RETENTION_SECONDS = HISTORY_BUCKET_SECONDS * HISTORY_BUCKETS
+
+    def _prune_locked(self, now: Optional[float] = None) -> None:
+        """
+        Drop confirmed rows and submitted spots older than the window.
+        Caller holds the lock.
+
+        A confirmed row ages on when it was LAST heard, not when it was first
+        — a station worked all day is one row that stays, not one that
+        vanishes 24 hours after its first decode while it is still talking.
+        """
+        cutoff = (now if now is not None else time.time()) - self.RETENTION_SECONDS
+        stale = [
+            key for key, entry in self._confirmed.items()
+            if (entry.get("timestamp") or entry.get("first_seen") or 0) < cutoff
+        ]
+        for key in stale:
+            del self._confirmed[key]
+        # In submission order, so everything stale is at the left end — stop
+        # at the first live entry rather than rebuilding the deque.
+        while self._spots and (self._spots[0].get("time") or 0) < cutoff:
+            self._spots.popleft()
+
     def _record_history(self, kind: str, band: str, callsign: str) -> None:
         """Note one station active on a band. Caller holds the lock."""
         if not band or not callsign:
@@ -573,6 +608,7 @@ class WebUI:
         first = current - self.HISTORY_BUCKETS + 1
 
         with self._lock:
+            self._prune_locked()
             agg: Dict[str, Dict[str, Any]] = {}
             for (bucket, band), counts in self._history.items():
                 if bucket < first:
@@ -775,11 +811,13 @@ class WebUI:
 
     def query_spots(self, args) -> Dict[str, Any]:
         """
-        Filtered view of every confirmed sighting. See README for the
-        parameter reference. Raises QueryError on a bad parameter.
+        Filtered view of the confirmed sightings still inside the retention
+        window. See README for the parameter reference. Raises QueryError on a
+        bad parameter.
         """
         now = time.time()
         with self._lock:
+            self._prune_locked(now)
             entries = list(self._confirmed.values())
             comments = {s.get("key", ""): s.get("comment", "") for s in self._spots}
 
@@ -1185,6 +1223,12 @@ class WebUI:
         with self._lock:
             self._stats = dict(stats)
             self._targets = targets
+            # The scanner calls this every couple of seconds for the lifetime
+            # of the run, which makes it the one place ageing happens on its
+            # own rather than only when something is pushed or read. Without
+            # it a scanner that went quiet overnight would keep serving
+            # yesterday's rows to the next page load.
+            self._prune_locked()
             payload = self._stats_payload_locked()
         self._broadcast("stats", payload)
         self._broadcast("targets", targets)
@@ -1194,12 +1238,16 @@ class WebUI:
     def _stats_payload_locked(self) -> Dict[str, Any]:
         return {
             **self._stats,
+            # Windowed like the table it sits above, not a lifetime total:
+            # a counter that kept climbing while rows aged out from under it
+            # would contradict the thing the reader is looking at.
             "unique_confirmed": len(self._confirmed),
             "uptime": time.time() - self._start_time,
         }
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
+            self._prune_locked()
             return {
                 "workers": [
                     {

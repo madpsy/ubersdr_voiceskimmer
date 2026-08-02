@@ -354,6 +354,78 @@ class TestSpotQuery(unittest.TestCase):
             self.assertIn("error", body)
 
 
+class TestRetention(unittest.TestCase):
+    """
+    Confirmed rows and submitted spots age out on the same 24 hours the charts
+    use. Pinned here because the dashboard reads the two side by side: a table
+    still listing a station the chart beside it had already dropped is the
+    disagreement this exists to prevent.
+    """
+
+    def setUp(self):
+        self.ui = WebUI(workers=1)
+        self.now = time.time()
+
+    def _hear(self, call, hz, age):
+        self.ui.push_confirmed({
+            "normalised": call, "band": "20m", "frequency": hz, "mode": "usb",
+            "timestamp": self.now - age,
+        }, False, hz)
+
+    def _calls(self):
+        return sorted(
+            e["normalised"] for e in self.ui.snapshot()["confirmed"]
+        )
+
+    def test_snapshot_drops_confirmed_rows_past_the_window(self):
+        self._hear("G0VIM", 14226000, 60)
+        self._hear("OLD1ABC", 14188000, 25 * 3600)
+        self.assertEqual(self._calls(), ["G0VIM"])
+
+    def test_a_station_still_being_heard_is_kept(self):
+        # Ageing is on the LAST hearing, not the first: a station worked all
+        # day is one row that stays, not one that vanishes 24 hours after its
+        # first decode while it is still talking.
+        self._hear("EA5XX", 7155000, 30 * 3600)
+        self._hear("EA5XX", 7155000, 5)
+        entry = self.ui.snapshot()["confirmed"][0]
+        self.assertEqual(entry["normalised"], "EA5XX")
+        self.assertLess(entry["first_seen"], self.now - 24 * 3600)
+        self.assertEqual(entry["hit_count"], 2)
+
+    def test_snapshot_drops_spots_past_the_window(self):
+        self.ui.push_spot("OLD1ABC", 14188000, "c", 14188000, "20m")
+        self.ui.push_spot("G0VIM", 14226000, "c", 14226000, "20m")
+        self.ui._spots[0]["time"] = self.now - 25 * 3600
+        calls = [s["callsign"] for s in self.ui.snapshot()["spots"]]
+        self.assertEqual(calls, ["G0VIM"])
+
+    def test_unique_confirmed_counts_the_window_not_the_run(self):
+        # The stats bar sits above the table it counts; a lifetime total there
+        # would contradict what the reader is looking at.
+        self._hear("G0VIM", 14226000, 60)
+        self._hear("OLD1ABC", 14188000, 25 * 3600)
+        self.ui.update_stats({"dwells": 1}, [])
+        self.assertEqual(self.ui.snapshot()["stats"]["unique_confirmed"], 1)
+
+    def test_the_query_api_is_windowed_too(self):
+        # /api/spots reads the same table, so an aged-out sighting must not
+        # reappear there after the dashboard stopped showing it.
+        self._hear("G0VIM", 14226000, 60)
+        self._hear("OLD1ABC", 14188000, 25 * 3600)
+        body = self.ui.app.test_client().get(
+            "/api/spots", headers={"X-Real-IP": "198.51.100.7"}
+        ).get_json()
+        self.assertEqual([s["callsign"] for s in body["spots"]], ["G0VIM"])
+        self.assertEqual(body["total"], 1)
+
+    def test_the_window_matches_the_chart(self):
+        self.assertEqual(
+            WebUI.RETENTION_SECONDS,
+            WebUI.HISTORY_BUCKET_SECONDS * WebUI.HISTORY_BUCKETS,
+        )
+
+
 class TestHistory(unittest.TestCase):
     """
     Backs the dashboard's rolling 24h chart. The window must always be a full

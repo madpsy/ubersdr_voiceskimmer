@@ -268,7 +268,7 @@ const HOOK =
   " renderTargets, appendTranscript, setLiveTranscript, redrawConfirmed," +
   " redrawSpots, bandClass, mapStations, tooltipHTML, countryFlag," +
   " flagHTML, panels, els, startRowAudio, stopRowAudio, buildChart, buildTopChart," +
-  " bandColour, bandClass, renderSettings, markSuperseded };\n})();\n";
+  " bandColour, bandClass, renderSettings, markSuperseded, sweepStale };\n})();\n";
 const patched = src.replace(/\n\}\)\(\);\s*$/, HOOK);
 assert.notStrictEqual(patched, src, "could not find the IIFE close in app.js");
 
@@ -278,6 +278,12 @@ eval(patched);
 const T = globalThis.__test;
 
 function stopRowAudioForTest() { T.stopRowAudio(); }
+
+// The tables only show the last 24 hours, so fixtures have to be dated
+// relative to now — a hard-coded timestamp ages out of the window and the
+// row it stands for silently stops rendering.
+const NOW = Math.floor(Date.now() / 1000);
+const AGED_OUT = NOW - 25 * 3600;
 
 let failures = 0;
 function check(name, fn) {
@@ -438,12 +444,12 @@ check("a full state snapshot renders", () => {
       {
         key: "G0VIM|14226000", normalised: "G0VIM", band: "20m",
         frequency: 14226000, mode: "usb", name: "Malcolm", country: "England",
-        latitude: 52.2, longitude: -0.9, timestamp: 1, first_seen: 1,
-        country_code: "GB", hit_count: 2, spotted_at: 2,
+        latitude: 52.2, longitude: -0.9, timestamp: NOW, first_seen: NOW,
+        country_code: "GB", hit_count: 2, spotted_at: NOW,
       },
     ],
     spots: [
-      { key: "G0VIM|14226000", time: 2, callsign: "G0VIM", band: "20m",
+      { key: "G0VIM|14226000", time: NOW, callsign: "G0VIM", band: "20m",
         country_code: "GB", country: "England",
         freq: 14226000, comment: "[Voice] Malcolm" },
     ],
@@ -540,7 +546,7 @@ check("supersession marks both rows and dims the retired one", () => {
     T.renderConfirmedRow({
       key: `${call}|14226000`, normalised: call, band: "20m",
       frequency: 14226000, mode: "usb", name: "", country: "Belgium",
-      country_code: "BE", timestamp: 3, first_seen: 3, hit_count: 1,
+      country_code: "BE", timestamp: NOW, first_seen: NOW, hit_count: 1,
     });
   }
   T.markSuperseded({
@@ -575,7 +581,7 @@ check("supersession survives a later hearing redrawing the row", () => {
   T.renderConfirmedRow({
     key: "ON2GBR|14226000", normalised: "ON2GBR", band: "20m",
     frequency: 14226000, mode: "usb", name: "", country: "Belgium",
-    country_code: "BE", timestamp: 9, first_seen: 3, hit_count: 2,
+    country_code: "BE", timestamp: NOW, first_seen: NOW, hit_count: 2,
     superseded_by: "",
   });
   T.redrawConfirmed();
@@ -841,6 +847,98 @@ check("settings render grouped, human-readable rows", () => {
 check("settings render survives an empty list", () => {
   T.renderSettings([]);
   assert.ok(byId["settings-body"].innerHTML.includes("No settings"));
+});
+
+// -- 24 hour window ---------------------------------------------------------
+// These run last: they replace the page state with their own snapshot.
+
+// The rows both tables are windowed on, one inside the window and one out.
+function windowSnapshot() {
+  return {
+    workers: [],
+    confirmed: [
+      {
+        key: "G0VIM|14226000", normalised: "G0VIM", band: "20m",
+        frequency: 14226000, mode: "usb", country: "England",
+        country_code: "GB", timestamp: NOW, first_seen: NOW, hit_count: 1,
+      },
+      {
+        key: "OLD1ABC|7155000", normalised: "OLD1ABC", band: "40m",
+        frequency: 7155000, mode: "lsb", country: "Spain",
+        country_code: "ES", timestamp: AGED_OUT, first_seen: AGED_OUT,
+        hit_count: 1,
+      },
+    ],
+    spots: [
+      { key: "OLD1ABC|7155000", time: AGED_OUT, callsign: "OLD1ABC",
+        band: "40m", country_code: "ES", country: "Spain", freq: 7155000,
+        comment: "[Voice] yesterday" },
+      { key: "G0VIM|14226000", time: NOW, callsign: "G0VIM", band: "20m",
+        country_code: "GB", country: "England", freq: 14226000,
+        comment: "[Voice] Malcolm" },
+    ],
+    targets: [],
+    stats: {},
+  };
+}
+
+check("a snapshot older than 24 hours does not render", () => {
+  byId["confirmed-filter"].value = "";
+  byId["spots-filter"].value = "";
+  T.applyState(windowSnapshot());
+  const conf = T.els.confirmedBody.innerHTML;
+  const spot = T.els.spotsBody.innerHTML;
+  assert.ok(conf.includes("G0VIM"), "today's confirmed row is missing");
+  assert.ok(!conf.includes("OLD1ABC"), "yesterday's confirmed row still shows");
+  assert.ok(spot.includes("G0VIM"), "today's spot is missing");
+  assert.ok(!spot.includes("OLD1ABC"), "yesterday's spot still shows");
+  // The map draws from the same collection, so a stale row would have left a
+  // marker behind after the table dropped it.
+  assert.ok(!T.mapStations().has("OLD1ABC"), "aged-out station still on the map");
+});
+
+check("rows age out of an open page without a reload", () => {
+  // The snapshot only arrives on load and on reconnect. A dashboard left open
+  // overnight has to expire its own rows or it keeps showing what the server
+  // has already dropped.
+  T.applyState(windowSnapshot());
+  T.renderConfirmedRow({
+    key: "DL2BHM|14188000", normalised: "DL2BHM", band: "20m",
+    frequency: 14188000, mode: "usb", country: "Germany", country_code: "DE",
+    timestamp: AGED_OUT, first_seen: AGED_OUT, hit_count: 1,
+  });
+  T.renderSpotRow({
+    key: "DL2BHM|14188000", time: AGED_OUT, callsign: "DL2BHM", band: "20m",
+    country_code: "DE", country: "Germany", freq: 14188000, comment: "[Voice]",
+  });
+  assert.ok(T.els.confirmedBody.innerHTML.includes("DL2BHM"), "row never rendered");
+
+  T.sweepStale();
+  assert.ok(
+    !T.els.confirmedBody.innerHTML.includes("DL2BHM"),
+    "expired confirmed row survived the sweep"
+  );
+  assert.ok(
+    !T.els.spotsBody.innerHTML.includes("DL2BHM"),
+    "expired spot survived the sweep"
+  );
+  // And it takes only what expired: the fresh row is still there.
+  assert.ok(T.els.confirmedBody.innerHTML.includes("G0VIM"), "swept too much");
+  assert.ok(T.els.spotsBody.innerHTML.includes("G0VIM"), "swept too much");
+});
+
+check("a station still being heard is kept however old it is", () => {
+  // Ageing is on the LAST hearing, not the first — a station worked all day
+  // is one row that stays, not one that vanishes 24 hours after its first
+  // decode while it is still talking.
+  T.applyState(windowSnapshot());
+  T.renderConfirmedRow({
+    key: "EA5XX|7155000", normalised: "EA5XX", band: "40m",
+    frequency: 7155000, mode: "lsb", country: "Spain", country_code: "ES",
+    timestamp: NOW, first_seen: AGED_OUT, hit_count: 40,
+  });
+  T.sweepStale();
+  assert.ok(T.els.confirmedBody.innerHTML.includes("EA5XX"), "long-running row dropped");
 });
 
 console.log(

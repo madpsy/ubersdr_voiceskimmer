@@ -92,6 +92,13 @@ callsigns, band/freq activity, and DX spots submitted, updating in real time.
 Rows and transcript lines are tinted by band, and the confirmed and spots
 tables each carry a free-text filter over callsign, frequency and name.
 
+Both tables show a **rolling 24 hours** — the same window as the charts below
+them, so nothing on the page can disagree about what the last day looked like.
+A confirmed row ages on when the station was *last* heard, not when it was
+first, so one worked all day stays put rather than vanishing while it is still
+talking. The window applies to the history a page load is handed as well as to
+an already-open dashboard, which expires its own rows as they fall out.
+
 The dashboard's **🔈 Listen** button plays the audio the scanner is currently
 hearing, following it as it hops. See
 [Audio preview](#how-the-audio-preview-works) for what it does server-side.
@@ -302,8 +309,10 @@ A full roaming scan across every band, with spot submission on:
 ## 6. HTTP API
 
 The dashboard's own endpoints are documented here too, but `GET /api/spots` is
-the one meant for other programs: every confirmed sighting, with everything
-known about it, filterable.
+the one meant for other programs: every confirmed sighting in the last 24
+hours, with everything known about it, filterable. It reads the same table the
+dashboard does, so it holds the same rolling window — `--output` is the durable
+record of anything older.
 
 A record is one **callsign on one frequency**. The same station heard on two
 bands is two records — that is also how corroboration and the re-spot cooldown
@@ -357,8 +366,8 @@ Rate limited to **one request per second per address**, same as
 
 ### Response
 
-`total` is everything held, `matched` is how many passed the filters, `count`
-is how many are in this page.
+`total` is everything held — i.e. the last 24 hours — `matched` is how many
+passed the filters, `count` is how many are in this page.
 
 ```json
 {
@@ -399,7 +408,7 @@ durable record. Nothing here is authenticated — see the note on exposure in
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/state` | Full dashboard snapshot (workers, transcript tail, confirmed, spots, targets, stats). |
+| `GET /api/state` | Full dashboard snapshot (workers, transcript tail, confirmed, spots, targets, stats). Confirmed rows and submitted spots are the last 24 hours, matching the tables and charts they draw. |
 | `GET /api/history` | Per-band activity over a rolling 24 hours, one bucket per hour, plus `top_callsigns` — both of the dashboard's charts from one poll. Always 24 buckets, zero-filled. The per-hour series count **distinct callsigns** per bucket, not events; `top_callsigns` counts total hits per station over the same window. |
 | `GET /api/events` | SSE stream of incremental updates. |
 | `POST /api/explain` | Why a transcript line did or did not yield a callsign. Body `{"text": "..."}`. Rate limited 1/s per address. |
