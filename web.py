@@ -126,47 +126,70 @@ def csv_set(value: str) -> Set[str]:
 
 class RateLimiter:
     """
-    At most one request per `interval` per key.
+    A token bucket per key: one token per `interval`, at most `burst` saved up.
 
-    Only a SUCCESSFUL request advances the clock, so a client hammering the
-    endpoint still gets exactly one through per interval rather than being
-    pushed further out by its own rejected attempts.
+    The sustained rate is one request per interval, but a caller that has been
+    quiet may spend up to `burst` at once — which is what a real client does,
+    since a dashboard refresh fires its queries together rather than politely
+    spacing them. `burst=1` is the strict one-per-interval spacing.
 
-    Bounded: entries older than the interval are dead weight, so they are
-    swept once the map grows past `max_entries`. If a genuine flood from
-    many distinct addresses leaves nothing to sweep, the oldest half goes
-    anyway — losing a little rate-limit state under attack is much better
-    than growing the map without limit in a long-running container.
+    Only a SUCCESSFUL request spends a token, so a client hammering the
+    endpoint still gets its full allowance rather than being pushed further
+    out by its own rejected attempts.
+
+    Bounded: a bucket that has refilled to full says nothing that a missing
+    entry does not, so those are swept once the map grows past `max_entries`.
+    If a genuine flood from many distinct addresses leaves nothing to sweep,
+    the oldest half goes anyway — losing a little rate-limit state under
+    attack is much better than growing the map without limit in a
+    long-running container.
     """
 
-    def __init__(self, interval: float = 1.0, max_entries: int = 10000):
+    def __init__(self, interval: float = 1.0, burst: int = 1,
+                 max_entries: int = 10000):
         self.interval = interval
+        self.burst = max(1, int(burst))
         self.max_entries = max_entries
+        # key -> (tokens left, when that count was taken). Refill is computed
+        # lazily from the elapsed time rather than swept by a timer.
         # monotonic, not wall clock: this measures an elapsed interval, and
         # an NTP step must not hand out a free request or a long lockout.
-        self._last: Dict[str, float] = {}
+        self._buckets: Dict[str, Tuple[float, float]] = {}
         self._lock = threading.Lock()
 
     def allow(self, key: str) -> Tuple[bool, float]:
         """Returns (allowed, seconds until the next request is allowed)."""
         now = time.monotonic()
         with self._lock:
-            last = self._last.get(key)
-            if last is not None and now - last < self.interval:
-                return False, self.interval - (now - last)
-            self._last[key] = now
-            if len(self._last) > self.max_entries:
+            tokens, updated = self._buckets.get(key, (float(self.burst), now))
+            tokens = min(float(self.burst), tokens + (now - updated) / self.interval)
+            if tokens < 1.0:
+                # Storing the refilled count on a rejection is not a penalty:
+                # it is the same number the next call would compute anyway.
+                self._buckets[key] = (tokens, now)
+                return False, (1.0 - tokens) * self.interval
+            self._buckets[key] = (tokens - 1.0, now)
+            # A rejection only ever hits a key already in the map — a new one
+            # starts full — so the allowed path is the only one that grows it.
+            if len(self._buckets) > self.max_entries:
                 self._prune(now)
             return True, 0.0
 
+    def describe(self) -> str:
+        """The budget in words, for the 429 body."""
+        if self.burst == 1:
+            return f"one request per {self.interval:g}s"
+        return f"{self.burst} requests per {self.burst * self.interval:g}s"
+
     def _prune(self, now: float) -> None:
         """Caller holds the lock."""
-        for key in [k for k, t in self._last.items() if now - t >= self.interval]:
-            del self._last[key]
-        if len(self._last) > self.max_entries:
-            oldest = sorted(self._last, key=lambda k: self._last[k])
+        for key, (tokens, updated) in list(self._buckets.items()):
+            if tokens + (now - updated) / self.interval >= self.burst:
+                del self._buckets[key]
+        if len(self._buckets) > self.max_entries:
+            oldest = sorted(self._buckets, key=lambda k: self._buckets[k][1])
             for key in oldest[: len(oldest) // 2]:
-                del self._last[key]
+                del self._buckets[key]
 
 log = logging.getLogger(__name__)
 
@@ -314,8 +337,12 @@ class WebUI:
         # One budget per endpoint rather than one shared across both: they
         # answer different questions, and a dashboard fetching an explanation
         # should not lock the caller out of the spot query for a second.
+        # /api/spots is cheap — it filters state already in memory — and a
+        # dashboard legitimately polls it, so it gets four times the budget,
+        # spendable in one burst: a page that fires four queries on refresh
+        # should not have three of them answered with a 429.
         self.explain_limiter = RateLimiter(interval=1.0)
-        self.spots_limiter = RateLimiter(interval=1.0)
+        self.spots_limiter = RateLimiter(interval=0.25, burst=4)
 
         # Everything a single scanning session owns is keyed by worker id.
         # Confirmed callsigns, spots and stats stay shared — they are results,
@@ -456,11 +483,13 @@ class WebUI:
             Every confirmed sighting in the last 24 hours, filtered.
             Documented in README.md.
 
-            Rate limited to one request per second per address, like
-            /api/explain: it accepts caller-supplied filters and can return a
-            large response, so it is not in the same class as the dashboard's
-            own /api/state poll. `limit` is capped server-side too, so a
-            single request cannot ask for an unbounded response.
+            Rate limited to four requests per second per address, burstable:
+            it accepts caller-supplied filters and can return a large
+            response, so it is not in the same class as the dashboard's own
+            /api/state poll, but it only filters state already in memory, so
+            it gets a looser budget than /api/explain. `limit` is capped
+            server-side too, so a single request cannot ask for an unbounded
+            response.
             """
             limited = self._too_many(self.spots_limiter)
             if limited is not None:
@@ -717,8 +746,10 @@ class WebUI:
         allowed, retry_after = limiter.allow(client_ip(request))
         if allowed:
             return None
+        # The budget differs per endpoint, so state the actual one rather
+        # than a fixed "one per second" that would now be wrong for /api/spots.
         resp = jsonify({
-            "error": "rate limited — one request per second",
+            "error": f"rate limited — {limiter.describe()}",
             "retry_after": round(retry_after, 2),
         })
         resp.status_code = 429

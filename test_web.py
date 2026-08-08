@@ -110,7 +110,7 @@ class TestRateLimiter(unittest.TestCase):
         rl = RateLimiter(interval=0.01, max_entries=50)
         for i in range(500):
             rl.allow(f"10.0.0.{i}")
-        self.assertLessEqual(len(rl._last), 50 + 1)
+        self.assertLessEqual(len(rl._buckets), 50 + 1)
 
     def test_bounded_even_when_nothing_is_stale(self):
         # A flood from many addresses at once leaves nothing to sweep; the
@@ -118,7 +118,50 @@ class TestRateLimiter(unittest.TestCase):
         rl = RateLimiter(interval=3600, max_entries=50)
         for i in range(500):
             rl.allow(f"10.0.0.{i}")
-        self.assertLessEqual(len(rl._last), 50 + 1)
+        self.assertLessEqual(len(rl._buckets), 50 + 1)
+
+    def test_rejections_do_not_grow_the_map(self):
+        # A rejection can only hit a key that is already there, so hammering
+        # from one address must not add entries.
+        rl = RateLimiter(interval=3600)
+        rl.allow("1.2.3.4")
+        for _ in range(100):
+            rl.allow("1.2.3.4")
+        self.assertEqual(len(rl._buckets), 1)
+
+    def test_burst_is_spendable_at_once(self):
+        rl = RateLimiter(interval=0.25, burst=4)
+        self.assertEqual([rl.allow("1.2.3.4")[0] for _ in range(4)], [True] * 4)
+        allowed, retry = rl.allow("1.2.3.4")
+        self.assertFalse(allowed)
+        # One interval, not the whole four-token window.
+        self.assertGreater(retry, 0)
+        self.assertLessEqual(retry, 0.25)
+
+    def test_burst_refills_one_token_at_a_time(self):
+        # Draining the bucket must not lock the caller out until the whole
+        # burst has refilled — one interval buys exactly one more request.
+        rl = RateLimiter(interval=0.05, burst=3)
+        for _ in range(3):
+            self.assertTrue(rl.allow("1.2.3.4")[0])
+        self.assertFalse(rl.allow("1.2.3.4")[0])
+        time.sleep(0.06)
+        self.assertTrue(rl.allow("1.2.3.4")[0])
+        self.assertFalse(rl.allow("1.2.3.4")[0])
+
+    def test_saved_up_tokens_are_capped_at_the_burst(self):
+        # Idling for a long time must not bank an unbounded allowance.
+        rl = RateLimiter(interval=0.001, burst=2)
+        self.assertEqual([rl.allow("1.2.3.4")[0] for _ in range(2)], [True] * 2)
+        time.sleep(0.05)  # worth ~50 tokens if the cap were missing
+        self.assertEqual([rl.allow("1.2.3.4")[0] for _ in range(2)], [True] * 2)
+        self.assertFalse(rl.allow("1.2.3.4")[0])
+
+    def test_describes_its_budget(self):
+        self.assertEqual(RateLimiter(interval=1.0).describe(),
+                         "one request per 1s")
+        self.assertEqual(RateLimiter(interval=0.25, burst=4).describe(),
+                         "4 requests per 1s")
 
     def test_concurrent_callers_get_exactly_one_through(self):
         rl = RateLimiter(interval=10.0)
@@ -234,8 +277,8 @@ class TestSpotQuery(unittest.TestCase):
                 self.ui.push_spot(call, hz, "[Voice] N", hz, band, cc, ctry)
 
     def get(self, query=""):
-        # A distinct address per call: the endpoint allows one request per
-        # second per address and these tests fire many in a row.
+        # A distinct address per call: the endpoint allows four requests per
+        # second per address and these tests fire many more in a row.
         self._n = getattr(self, "_n", 0) + 1
         r = self.client.get(
             "/api/spots?" + query,
@@ -325,24 +368,43 @@ class TestSpotQuery(unittest.TestCase):
         self.assertTrue(rec["submitted"])
         self.assertEqual(rec["spot_comment"], "[Voice] N")
 
+    def spots(self, ip):
+        return self.client.get("/api/spots", headers={"X-Real-IP": ip})
+
     def test_rate_limited_per_address(self):
-        c = self.client
-        self.assertEqual(
-            c.get("/api/spots", headers={"X-Real-IP": "203.0.113.90"}).status_code, 200)
-        r = c.get("/api/spots", headers={"X-Real-IP": "203.0.113.90"})
+        # Four back to back is the burst, and the fifth is over budget.
+        self.assertEqual([self.spots("203.0.113.90").status_code for _ in range(4)],
+                         [200] * 4)
+        r = self.spots("203.0.113.90")
         self.assertEqual(r.status_code, 429)
+        # Whole seconds is all RFC 9110 allows, so a sub-second wait still
+        # advertises 1 in the header; the body carries the real figure.
         self.assertEqual(r.headers["Retry-After"], "1")
-        self.assertEqual(
-            c.get("/api/spots", headers={"X-Real-IP": "203.0.113.91"}).status_code, 200)
+        self.assertLessEqual(r.get_json()["retry_after"], 0.25)
+        self.assertIn("4 requests per 1s", r.get_json()["error"])
+        # A different caller is untouched by that.
+        self.assertEqual(self.spots("203.0.113.91").status_code, 200)
+
+    def test_budget_refills_a_quarter_second_at_a_time(self):
+        # The looser budget is the whole point of the endpoint being cheap:
+        # once drained, a quarter second buys another request, where
+        # /api/explain would still be locked out.
+        for _ in range(4):
+            self.assertEqual(self.spots("203.0.113.93").status_code, 200)
+        self.assertEqual(self.spots("203.0.113.93").status_code, 429)
+        time.sleep(0.26)
+        self.assertEqual(self.spots("203.0.113.93").status_code, 200)
 
     def test_its_budget_is_separate_from_explain(self):
-        # Spending the spots budget must not lock the caller out of an
+        # Spending the whole spots burst must not lock the caller out of an
         # explanation.
-        c, ip = self.client, {"X-Real-IP": "203.0.113.92"}
-        self.assertEqual(c.get("/api/spots", headers=ip).status_code, 200)
+        ip = "203.0.113.92"
+        for _ in range(4):
+            self.assertEqual(self.spots(ip).status_code, 200)
+        self.assertEqual(self.spots(ip).status_code, 429)
         self.assertEqual(
-            c.post("/api/explain", json={"text": "hi"}, headers=ip).status_code, 200)
-        self.assertEqual(c.get("/api/spots", headers=ip).status_code, 429)
+            self.client.post("/api/explain", json={"text": "hi"},
+                             headers={"X-Real-IP": ip}).status_code, 200)
 
     def test_bad_parameters_are_400_not_an_empty_list(self):
         # Answering a typo with [] reads as "nothing matched", which is the

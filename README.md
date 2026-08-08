@@ -360,9 +360,11 @@ it could do.
 | `limit`, `offset` | Default 500, capped at 5000. |
 | `fields` | Comma list to trim the response to just those fields. |
 
-Rate limited to **one request per second per address**, same as
-`/api/explain`, with its own separate budget. Over the limit is a `429` with
-`Retry-After`.
+Rate limited to **four requests per second per address**, with its own budget
+separate from `/api/explain`. It is a token bucket, so a caller that has been
+idle can spend all four at once and then refills one every 250 ms. Over the
+limit is a `429` with `Retry-After` (whole seconds, per RFC 9110) and a
+precise `retry_after` in the JSON body.
 
 ### Response
 
