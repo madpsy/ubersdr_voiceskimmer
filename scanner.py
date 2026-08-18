@@ -40,6 +40,7 @@ from phonetics import (
     normalise_callsign,
 )
 from dxcluster import DXClusterSpotter, SpotThrottle, SupersessionTracker
+from mqtt import build_publisher
 from timeline import FrequencyTimeline
 from ubersdr import Segment, UberSDRSession
 from web import WebUI
@@ -198,6 +199,12 @@ class SharedState:
             if not args.no_supersede else None
         )
         self.spotter: Optional[DXClusterSpotter] = None
+        # MQTT publishing through UberSDR's addon ingest port. Always on and
+        # needs no configuration — the endpoint is derived from --host. Set
+        # after construction by main(), since it reads this SharedState for the
+        # summary payload. Never None once main() has run; a no-op stand-in is
+        # substituted if the publisher could not be built at all.
+        self.mqtt: Any = None
         self.lock = threading.Lock()
         # Keyed (callsign, frequency-bucket) rather than callsign alone: a
         # station that moves bands is a fresh sighting worth its own row and
@@ -1520,8 +1527,12 @@ class CallsignScanner:
         )
         log.info("      heard: %r", detection.raw_text[:140])
 
+        payload = asdict(detection)
         if self.web:
-            self.web.push_confirmed(asdict(detection), is_repeat, freq_bucket)
+            self.web.push_confirmed(payload, is_repeat, freq_bucket)
+        if self.shared.mqtt:
+            # Queued, not sent inline: this runs on the worker's audio thread.
+            self.shared.mqtt.publish_confirmed(payload, is_repeat)
 
     def _maybe_spot(self, detection: Detection) -> None:
         """
@@ -1567,6 +1578,12 @@ class CallsignScanner:
                 self.web.push_spot(
                     detection.normalised, detection.frequency, comment,
                     self.spot_throttle.bucket_freq(detection.frequency),
+                    detection.band, detection.country_code, detection.country,
+                    detection.mode,
+                )
+            if self.shared.mqtt:
+                self.shared.mqtt.publish_spot(
+                    detection.normalised, detection.frequency, comment,
                     detection.band, detection.country_code, detection.country,
                     detection.mode,
                 )
@@ -2198,6 +2215,13 @@ def main(argv=None) -> int:
 
     base_url = f"{'https' if args.ssl else 'http'}://{args.host}:{args.port}"
     shared = SharedState(args, base_url)
+
+    # MQTT publishing through UberSDR's addon ingest port. Always on, no
+    # configuration — see mqtt.py. Built after SharedState because the summary
+    # payload reads from it, and before the workers start so nothing can
+    # confirm a callsign while shared.mqtt is still None.
+    shared.mqtt = build_publisher(args.host, shared)
+
     scanners = [
         CallsignScanner(args, web=web_ui, worker_id=wid, shared=shared)
         for wid in range(parallel)
@@ -2207,6 +2231,7 @@ def main(argv=None) -> int:
         log.info("Interrupted")
         for s in scanners:
             s.stop()
+        shared.mqtt.stop()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)

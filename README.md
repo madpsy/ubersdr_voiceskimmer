@@ -4,7 +4,7 @@ Hops around detected voice activity, feeds each frequency to the Whisper
 speech-to-text extension, extracts candidate callsigns from the transcript, and
 validates every one against QRZ. Optionally submits confirmed callsigns as real
 DX spots. A live dashboard (transcript, confirmed callsigns, band/freq
-activity, DX spots) is built in — see [Docker / Deployment](#8-docker--deployment)
+activity, DX spots) is built in — see [Docker / Deployment](#9-docker--deployment)
 to run it as a container alongside UberSDR, or `--web-port` when running from
 source.
 
@@ -158,7 +158,7 @@ see nothing while it runs. Use `tee` if you want a copy:
 
 UberSDR 0.1.59 added `whisper.trusted_containers`, which lists `voiceskimmer` by
 default. When the scanner runs as that container on the server's own Docker
-network — the [compose deployment](#8-docker--deployment) — the server
+network — the [compose deployment](#9-docker--deployment) — the server
 recognises it and:
 
 * accepts the recognition parameters whatever `whisper.allow_client_params` is
@@ -404,7 +404,7 @@ guess (see [Frequency attribution](#frequency-attribution)).
 
 State is in memory only: it starts empty on restart, and `--output` remains the
 durable record. Nothing here is authenticated — see the note on exposure in
-[Docker / Deployment](#8-docker--deployment).
+[Docker / Deployment](#9-docker--deployment).
 
 ### Other endpoints
 
@@ -417,7 +417,168 @@ durable record. Nothing here is authenticated — see the note on exposure in
 | `GET /api/audio/<worker>` | Live audio from that worker, WebM/Opus. |
 | `GET /api/settings` | The scan's runtime settings, grouped and human-readable — backs the "?" button next to the stats bar. Excludes the UberSDR host/port and any credential (`--password`, `--spotter-pass`). |
 
-## 7. Tests
+## 7. MQTT / Home Assistant
+
+If the UberSDR receiver has MQTT enabled, the scanner publishes through it
+automatically. **There is nothing to configure and nothing to add to
+`docker-compose.yml`** — the ingest endpoint is derived from `UBERSDR_HOST`,
+which the container already has.
+
+When the receiver has MQTT turned off, or this container is not a recognised
+addon, publishing is silently skipped and the scanner runs exactly as before.
+Publishing never blocks detection: events go onto a bounded queue drained by a
+background thread, and are dropped if the receiver is slow or unreachable.
+
+### Topics
+
+Published under the receiver's own topic prefix (`ubersdr/metrics` by default):
+
+| Topic | Retained | Contents |
+| --- | --- | --- |
+| `…/addons/voiceskimmer/confirmed` | no | One message per confirmed callsign |
+| `…/addons/voiceskimmer/spots` | no | One message per DX spot this scanner submitted |
+| `…/addons/voiceskimmer/summary` | yes | Rolling counters and last-seen state, every 30 s |
+| `…/addons/voiceskimmer/status` | yes | `online` / `offline`, maintained by UberSDR |
+
+A confirmed callsign — the same detection the dashboard receives, with the
+transcript trimmed to 200 characters (the full text stays in the JSONL log and
+the dashboard):
+
+```json
+{
+  "time": "2026-08-18T14:00:00Z",
+  "timestamp": 1787044094.79,
+  "callsign": "G4ABC",
+  "band": "20m",
+  "frequency": 14205000,
+  "mode": "usb",
+  "snr": 24.5,
+  "name": "Alice Example",
+  "country": "England",
+  "country_code": "GB",
+  "grid": "IO91",
+  "latitude": 51.5,
+  "longitude": -0.1,
+  "is_repeat": false,
+  "agrees_with_dx_spot": false,
+  "dx_corrected": false,
+  "heard": "this is golf four alpha bravo charlie calling cq"
+}
+```
+
+A submitted spot (only ever published when `SPOT` is enabled and the cluster
+login succeeded — this is what actually went out, not what was considered):
+
+```json
+{
+  "time": "2026-08-18T14:00:05Z",
+  "timestamp": 1787044099.12,
+  "callsign": "G4ABC",
+  "frequency": 14205000,
+  "band": "20m",
+  "mode": "usb",
+  "comment": "[Voice] Alice Example",
+  "country": "England",
+  "country_code": "GB"
+}
+```
+
+The retained summary carries the counters plus the last confirmation and last
+spot broken out field by field, so a subscriber never has to parse a nested
+object or convert units:
+
+```json
+{
+  "confirmed_total": 142,
+  "confirmed_last_hour": 18,
+  "unique_callsigns": 96,
+  "spots_total": 37,
+  "scanning": true,
+  "spotting_enabled": true,
+
+  "last_callsign": "G4ABC",
+  "last_confirmed_utc": "2026-08-18T14:00:00Z",
+  "last_frequency_hz": 14205000,
+  "last_frequency_mhz": 14.205,
+  "last_band": "20m",
+  "last_mode": "usb",
+  "last_country": "England",
+  "last_country_code": "GB",
+
+  "last_spot_callsign": "M0XYZ",
+  "last_spot_frequency_hz": 7150000,
+  "last_spot_frequency_mhz": 7.15,
+  "last_spot_band": "40m",
+  "last_spot_country": "Wales",
+
+  "dwells": 412,
+  "candidates": 1877,
+  "validated": 142,
+  "rejected": 1735,
+  "qrz_lookups": 208,
+  "dropped_events": 0
+}
+```
+
+`last_callsign_detail` and `last_spot_detail` carry the same information as
+nested objects, including the QRZ name, grid square and coordinates.
+
+### Home Assistant
+
+When the receiver has Home Assistant discovery enabled, the scanner declares its
+entities automatically and appears as its own device — nested under the
+receiver, with a link straight through to this dashboard:
+
+| Entity | Type | Notes |
+| --- | --- | --- |
+| Callsigns Confirmed | sensor | Running total, `total_increasing` |
+| Callsigns (Last Hour) | sensor | Rolling 60-minute count |
+| Unique Callsigns | sensor | Distinct stations this run |
+| DX Spots Submitted | sensor | Running total, `total_increasing` |
+| Last Callsign | sensor | QRZ name, grid and coordinates as attributes |
+| Last Frequency | sensor | MHz |
+| Last Band | sensor | e.g. `20m` |
+| Last Country | sensor | DXCC entity name; ISO code as an attribute |
+| Last Confirmation | sensor | Timestamp |
+| Last Spot | sensor | Band, country and mode as attributes |
+| Last Spot Frequency | sensor | MHz |
+| Scanning | binary sensor | On while the dwell counter is advancing |
+| DX Spotting Enabled | binary sensor | Whether spot submission is configured, diagnostic |
+
+All thirteen read from the single retained `summary` topic, so Home Assistant
+has values the moment it subscribes rather than waiting for the next callsign.
+
+Frequency, band and country get entities of their own rather than living only as
+attributes of *Last Callsign*, so they can be put straight onto a dashboard card
+or used as an automation trigger without a template. The full detail — QRZ name,
+grid square, latitude and longitude — is still attached to *Last Callsign* as
+attributes.
+
+The country entity carries `country_code` as an attribute so a dashboard can
+draw a flag. Don't map the country *name* to a flag: England, Scotland and Wales
+are three DXCC entities and one ISO country, which is exactly the case this
+hears most.
+
+"Scanning" deliberately tracks whether dwells are *advancing*, not whether the
+process is up — the receiver's own `status` topic already reports the latter, so
+a scanner that is running but stuck adds no information unless the two are
+separated.
+
+Entities go unavailable if either the receiver or this addon stops publishing.
+
+### Overriding the endpoint
+
+Only needed if the operator has changed `mqtt.addon_ingest.port` from its
+default of 6926 on the receiver:
+
+```yaml
+environment:
+  UBERSDR_INGEST_URL: "http://ubersdr:7000"
+```
+
+See `addon_mqtt.md` in the ka9q_ubersdr repository for the full ingest API.
+
+## 8. Tests
 
 ```bash
 .venv/bin/python -m pytest -q     # or: python -m unittest discover -p 'test_*.py'
@@ -441,7 +602,7 @@ call placed above a `let` declaration hit its temporal dead zone and took the
 whole page down with `can't access lexical declaration 'map' before
 initialization`.
 
-## 8. Docker / Deployment
+## 9. Docker / Deployment
 
 Packaged the same way as the other [ubersdr addons](https://ubersdr.org) —
 a container that runs alongside UberSDR, joined to its `sdr-network`, and
