@@ -10,8 +10,13 @@ The audio session is what gives us (a) something for Whisper to tap and (b) the
 "active audio session" that /api/lookup requires for auth. We immediately mute
 it: the extension tap is fed in the RTP receive path (audio.go, before the mute
 check in streamAudio), so Whisper still receives full-rate audio server-side
-while we receive no audio bytes at all. That means no Opus or zstd decoding in
-this client — we just drain the socket.
+while we receive no audible PCM at all.
+
+We do NOT decode the audio payload — but we are not merely draining the socket
+either. Every binary frame's HEADER is parsed, because it carries the live
+signal-quality pair that drives the silence check (see _handle_audio_frame).
+The body is skipped entirely: pcm_v4's header decoder is self-contained, so
+never running the predictive codec cannot desynchronise anything.
 
 Retuning uses the "tune" control message rather than reconnecting, which keeps
 the same radiod channel and leaves the extension tap attached across hops.
@@ -29,25 +34,34 @@ from typing import Callable, List, Optional
 import requests
 import websocket
 
-try:
-    import zstandard
-except ImportError:                       # signal metrics degrade, scan does not
-    zstandard = None
+import pcm_v4
+from pcm_v4 import PCM_PROTOCOL_VERSION, PCMv4Error, is_v4_packet, is_zstd_frame
 
 from useragent import USER_AGENT
 
 log = logging.getLogger(__name__)
 
-# Audio frames are a zstd-compressed PCM binary packet (pcm_binary.go). Only
-# the "full" header carries signal quality; the minimal one is timestamp-only.
-PCM_MAGIC_FULL = 0x5043        # "PC"
-PCM_MAGIC_MINIMAL = 0x504D     # "PM"
-# Offsets within the decompressed full header (version 2):
-#   0:2 magic | 2 version | 3 format | 4:12 gps ns | 12:20 wall clock
-#   20:24 sample rate | 24 channels | 25:29 baseband power | 29:33 noise density
-PCM_V2_SIGNAL_OFFSET = 25
-PCM_V2_MIN_LEN = 33
-# The server writes -999.0 when radiod has no channel status to report.
+# Audio protocol version asked for at connect, and the wire format under it.
+#
+# Versions 1-3 wrapped every lossless packet in zstd behind a fixed 29- or
+# 37-byte header, which is why this used to need the `zstandard` package just to
+# read four bytes of signal quality. Version 4 drops zstd entirely: the header is
+# plaintext at the front of the frame, carrying only the fields that changed
+# since the last packet, and only the BODY is coded (Rice over an adaptive
+# predictor). We never touch the body, so the whole codec is dead weight here —
+# pcm_v4's header decoder is all this client runs.
+#
+# `format` stays "pcm-zstd" because that is still the server's name for the
+# lossless format whatever version negotiated under it (websocket.go:459); it no
+# longer describes the compression. Version 4 is the newest the server
+# implements (pcmMaxProtocolVersion, pcm_v4_header.go) and it refuses anything
+# higher rather than silently serving an older one, so this must not run ahead
+# of the server.
+PCM_FORMAT = "pcm-zstd"
+
+# The server writes -999.0 when radiod has no channel status to report. In
+# version 4 that arrives as the QUALITY_NO_READING codepoint, which
+# pcm_v4.quality_to_float turns back into -999.0.
 PCM_NO_SIGNAL_DATA = -998.0
 
 # Passband edges (Hz, relative to carrier) requested for the audio the
@@ -112,8 +126,15 @@ class UberSDRSession:
         self.on_segment = on_segment
         self.on_error = on_error
         self.on_signal = on_signal
-        self._zstd = zstandard.ZstdDecompressor() if zstandard else None
-        self._signal_warned = False
+        # Version 4 headers are stateful: a packet carries only what changed
+        # since the one before it, so this decoder IS the stream and must be
+        # created per connection. A new UberSDRSession is built for every
+        # reconnect (see CallsignScanner._reconnect), which is what keeps it in
+        # step with the fresh encoder the server starts.
+        self._header = pcm_v4._HeaderDecoder()
+        # One message, not one per frame at ~50 Hz, if the server turns out to
+        # be too old to serve version 4.
+        self._legacy_warned = False
 
         self._ws_scheme = "wss" if use_ssl else "ws"
         self._audio_ws: Optional[websocket.WebSocketApp] = None
@@ -144,9 +165,10 @@ class UberSDRSession:
             f"frequency={self.frequency}",
             f"mode={self.mode}",
             f"user_session_id={self.user_session_id}",
-            # We never decode audio, but the server requires a valid format.
-            "format=pcm-zstd",
-            "version=2",
+            # We never decode the audio body, but the server requires a valid
+            # format and we want the header the version brings with it.
+            f"format={PCM_FORMAT}",
+            f"version={PCM_PROTOCOL_VERSION}",
         ]
         if self.password:
             from urllib.parse import quote
@@ -324,7 +346,7 @@ class UberSDRSession:
 
     def _on_audio_message(self, ws, message) -> None:
         # Binary frames are audio/silence packets. We never decode the audio
-        # itself, but their header carries live signal quality — see
+        # body, but their header carries live signal quality — see
         # _handle_audio_frame.
         if isinstance(message, bytes):
             self._handle_audio_frame(message)
@@ -360,36 +382,59 @@ class UberSDRSession:
 
     def _handle_audio_frame(self, frame: bytes) -> None:
         """
-        Pull baseband power and noise density out of an audio frame's header.
+        Pull baseband power and passband noise power out of a frame's header.
 
-        The audio payload is never decoded — only the header is read. Both
-        figures are present on every frame of a non-IQ mode (the server forces
-        a full header for exactly this reason) and, importantly, they remain
-        REAL while the session is muted: muting zeroes the PCM payload but not
-        the measured header metrics. So this gives a true ~50 Hz signal
-        reading without ever unmuting.
+        The audio body is never decoded — only the header is read, and the
+        header is self-delimiting, so skipping the body costs us nothing and
+        cannot desynchronise anything. The figures remain REAL while the session
+        is muted: muting zeroes the PCM payload but not the measured header
+        metrics. So this gives a true ~50 Hz signal reading without ever
+        unmuting.
 
-        SNR here is baseband power minus noise DENSITY, matching the server's
-        own definition (min_snr in websocket.go). It is not a per-channel SNR
-        — subtract 10*log10(bandwidth), about 34.8 dB for a 3 kHz SSB channel,
-        to get that. Measured live, a quiet frequency sits around 33-34 and a
-        signal peaks past 40.
+        Version 4 sends the pair only when it CHANGES — radiod updates it at
+        about 10 Hz, so most frames would just repeat it — and pcm_v4's header
+        decoder carries the last value forward onto every packet in between.
+        That is why the decoder is per connection: without the carry-forward
+        this would report a reading on roughly one frame in five and nothing on
+        the rest.
+
+        SNR here is baseband power minus passband noise POWER, which is a true
+        per-channel SNR. Up to protocol version 2 the second figure was noise
+        DENSITY, running about 33.7 dB higher for the same signal on this
+        client's 2350 Hz passband; --silence-min-snr was rescaled when this moved
+        to version 4. See channelNoisePower in the server's radiod_status.go.
         """
-        if self._zstd is None or self.on_signal is None:
+        if self.on_signal is None:
             return
+
+        if not is_v4_packet(frame):
+            # Opus frames have no magic, but we never ask for Opus. A zstd frame
+            # means the server clamped our version rather than refusing it,
+            # which is what a build older than 0.1.63 does.
+            if not self._legacy_warned:
+                self._legacy_warned = True
+                if is_zstd_frame(frame):
+                    log.warning(
+                        "Server answered protocol version %d with pre-v4 zstd "
+                        "frames — it is too old to serve version 4. Signal "
+                        "metrics are unavailable; the scan itself is unaffected.",
+                        PCM_PROTOCOL_VERSION,
+                    )
+                else:
+                    log.warning("Unrecognised audio frame (%d bytes) — ignoring",
+                                len(frame))
+            return
+
         try:
-            raw = self._zstd.decompress(frame, max_output_size=1 << 20)
-        except Exception:
+            header, _ = self._header.decode(frame)
+        except PCMv4Error as exc:
+            # A packet before the first resynchronisation point looks like this;
+            # the server's five-second resync ends that state on its own, so
+            # this is not worth reporting above debug.
+            log.debug("Undecodable v4 header: %s", exc)
             return
 
-        if len(raw) < PCM_V2_MIN_LEN:
-            return
-        magic, version = struct.unpack_from("<HB", raw, 0)
-        # Minimal-header frames carry no signal fields; version 1 has none either.
-        if magic != PCM_MAGIC_FULL or version < 2:
-            return
-
-        baseband, noise = struct.unpack_from("<ff", raw, PCM_V2_SIGNAL_OFFSET)
+        baseband, noise = header.baseband_power, header.noise
         if baseband <= PCM_NO_SIGNAL_DATA or noise <= PCM_NO_SIGNAL_DATA:
             return                      # radiod had no channel status to report
         self.on_signal(baseband, noise)

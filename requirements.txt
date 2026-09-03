@@ -1,4 +1,6 @@
 requests>=2.31
 websocket-client>=1.6.0
 flask>=3.0
-zstandard>=0.22
+# zstandard was needed only to unwrap protocol version 1-3 audio frames so the
+# signal-quality header could be read. Audio protocol version 4 does not use
+# zstd at all (see pcm_v4.py), and nothing else here compresses anything.
