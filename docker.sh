@@ -77,6 +77,12 @@ run_tests() {
         echo "Running frontend tests..."
         (cd "$SCRIPT_DIR" && node test_frontend.js) \
             || die "Frontend tests failed — not building. Set SKIP_TESTS=1 to override."
+        # static/minimal-radio.js is vendored from the UberSDR server and is
+        # re-synced wholesale when the protocol moves, so this checks both that
+        # the spectrum decoder still reads the server's wire format and that the
+        # two voiceskimmer-local changes survived the re-sync.
+        (cd "$SCRIPT_DIR" && node --test test_spectrum_v2.js) \
+            || die "Wire protocol tests failed — not building. Set SKIP_TESTS=1 to override."
     else
         echo "warning: node not found, skipping frontend tests" >&2
     fi
