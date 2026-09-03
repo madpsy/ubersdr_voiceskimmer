@@ -25,9 +25,12 @@
 #                         revisit; 1.0 = no reduction               (default: 0.50)
 #   MIN_SNR               Ignore activity below this SNR         (default: 20)
 #   MIN_CONFIDENCE        Ignore activity below this confidence   (default: 0.7)
-#   SILENCE_MIN_SNR       Peak SNR (dB) within SILENCE_TIMEOUT for a frequency
-#                         to count as active (default: 40). Measured from the
-#                         audio frame headers, independent of transcription.
+#   SILENCE_MIN_SNR       Peak per-channel SNR (dB) within SILENCE_TIMEOUT for a
+#                         frequency to count as active (default: 8). Measured
+#                         from the audio frame headers, independent of
+#                         transcription. Was 40 before audio protocol version 4;
+#                         both the units and the server's noise clamping changed,
+#                         so re-tune from 8 rather than converting an old value.
 #   SILENCE_TIMEOUT       Seconds to wait for that peak before moving on (default: 10)
 #   SILENCE_MIN_WORDS     Fallback word count when the server sends no signal
 #                         data (version 1, or no channel status)   (default: 3)

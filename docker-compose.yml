@@ -95,10 +95,11 @@ services:
       # at all. 20 trims the weakest without gutting the list; raise toward 25
       # to chase only the strong ones.
       #
-      # NOTE this is NOT the same scale as SILENCE_MIN_SNR below, despite both
-      # being "SNR in dB". That one is power vs noise DENSITY and runs about
-      # 34.8 dB higher for the same signal. Do not copy 40 up here: it would
-      # demand a 40 dB channel SNR and the scanner would find nothing to scan.
+      # Since audio protocol version 4 this IS the same scale as
+      # SILENCE_MIN_SNR below — both are per-channel SNR in dB. They still come
+      # from different sources (this one from the activity feed, that one from
+      # the audio frame headers), so the defaults are not interchangeable, but
+      # they are at least comparable now.
       # MIN_SNR: "20"
       # MIN_CONFIDENCE: "0.7"
       #
@@ -107,15 +108,27 @@ services:
       # anything. Any single peak above SILENCE_MIN_SNR within
       # SILENCE_TIMEOUT keeps the dwell alive; otherwise the scanner moves on.
       #
-      # This is power vs noise DENSITY, not per-channel SNR — subtract about
-      # 34.8 dB (10*log10 of a 3 kHz SSB channel) to compare it with MIN_SNR
-      # above, which IS per-channel. So this 40 is roughly 5 dB of channel
-      # SNR, in the same ballpark as MIN_SNR's 8 — the numbers look wildly
-      # different only because the two scales are.
+      # This is a true per-channel SNR in dB, and the default dropped from 40 to
+      # 8 at the audio protocol version 4 migration. TWO separate things changed
+      # at once, which is why the old number cannot simply be converted:
       #
-      # Measured live: a quiet frequency sits around 33-34 dB on this scale
-      # and peaks below 38, an active one peaks past 40.
-      # SILENCE_MIN_SNR: "40"
+      #   1. Units. The header's second figure was noise DENSITY up to protocol
+      #      version 2 and is passband noise POWER from version 3 on — about
+      #      33.7 dB lower on this client's 2350 Hz passband.
+      #   2. Clamping. The server's noise readings used to bottom out around
+      #      -30, so any threshold fitted before that was fitted to clamped
+      #      data: SNR read artificially low and over a compressed range.
+      #
+      # 8 is measured, not converted. Across 85 ten-second windows captured live
+      # on 20 m and 40 m phone, idle frequencies and pauses mid-QSO ran -2.0 to
+      # 4.4 dB with a tail to 6.8, and speech ran 9.0 to 23.7 — a clean gap, with
+      # 8 in the middle of it. Raise toward 9 to skip marginal signals, lower
+      # toward 7 to keep them; below about 6 the scanner starts dwelling on
+      # noise excursions.
+      #
+      # If you carried a tuned SILENCE_MIN_SNR over from an older release, do
+      # NOT try to convert it — re-tune from this default.
+      # SILENCE_MIN_SNR: "8"
       # SILENCE_TIMEOUT: "10"
       #
       # Fallback for servers that send no signal data (version 1, or radiod

@@ -246,7 +246,7 @@ exact frequency, so on a quiet instance expect zeroes.
 | `--revisit-cooldown` | 120 s | How long before a frequency may be revisited at all |
 | `--revisit-dwell-period` | 900 s | A frequency this scanner has already submitted a DX spot from within this long counts as a *revisit*. No effect without `--spot` |
 | `--revisit-dwell-percent` | 0.50 | Fraction of the normal dwell times to spend on such a revisit. `1.0` treats it like anything else |
-| `--min-snr` | 20.0 | Raise to skip marginal signals. A **per-channel** SNR, filtering the server's activity feed — not the same scale as `--silence-min-snr` |
+| `--min-snr` | 20.0 | Raise to skip marginal signals. A **per-channel** SNR, filtering the server's activity feed — a different source to `--silence-min-snr`, though the same scale since protocol version 4 |
 | `--min-extract-confidence` | 0.4 | Raise for precision, lower for recall |
 | `--min-callsign-length` | 4 | Minimum callsign length to be looked up at all — shorter ones never reach QRZ, so are never confirmed or spotted. Applies to literal verbatim matches too |
 | `--pipeline-latency` | 2.0 s | Raise if your WhisperLive is slow (affects frequency attribution) |
@@ -582,10 +582,11 @@ See `addon_mqtt.md` in the ka9q_ubersdr repository for the full ingest API.
 
 ```bash
 .venv/bin/python -m pytest -q     # or: python -m unittest discover -p 'test_*.py'
-node test_frontend.js             # dashboard
+node test_frontend.js             # dashboard load/wiring
+node --test test_spectrum_v2.js   # dashboard wire protocols
 ```
 
-Both run automatically on `./docker.sh build`, `arm64` and `push`, and a
+All three run automatically on `./docker.sh build`, `arm64` and `push`, and a
 failure stops the build before an image is produced. `SKIP_TESTS=1` overrides
 it.
 
@@ -594,6 +595,23 @@ ones — a recall improvement that lets ordinary conversation through is a bad
 trade. `test_rotation.py` guards against camping on one frequency.
 `test_web.py` covers the rate limiter and the client-address derivation
 behind the addon proxy.
+
+`test_ubersdr.py` covers the audio protocol: that the WebSocket asks for version
+4, and that the vendored `pcm_v4.py` decodes `testdata/pcmv4_stream.bin` — a
+stream the server's own encoder produced — to exactly the samples that went into
+it. That fixture earns its 90 kB: the version 4 predictor is backward adaptive,
+so the two ends derive their filter taps independently and never exchange a
+coefficient. Any arithmetic difference from the server returns plausible noise
+rather than an error, and nothing short of comparing samples would catch it.
+`pcm_v4.py` is vendored verbatim from `clients/python/pcm_v4.py` in the
+ka9q_ubersdr repository for the same reason — re-copy it, do not edit it.
+
+`test_spectrum_v2.js` builds spectrum frames from the server's definition
+(`user_spectrum_v2.go`, cross-checked against its own `spectrumV2EncodeRef`
+reference encoder) and runs them through `static/minimal-radio.js`. That file is
+a vendored copy which gets re-synced wholesale from upstream, so the same test
+also guards the two changes that are this addon's own: the 50–2400 Hz SSB
+passband and the AGC overrides.
 
 `test_frontend.js` loads `static/app.js` in a stubbed DOM. That is the only
 check that catches a dashboard which parses cleanly and then dies on load:
@@ -670,7 +688,7 @@ out in `docker-compose.yml` — an unset variable means the flag is not passed a
 |---|---|---|---|
 | `MIN_SNR` | `--min-snr` | `20.0` | per-channel dB, from the activity feed |
 | `MIN_CONFIDENCE` | `--min-confidence` | `0.7` |  |
-| `SILENCE_MIN_SNR` | `--silence-min-snr` | `40.0` | power vs noise **density** — a different scale to `MIN_SNR` |
+| `SILENCE_MIN_SNR` | `--silence-min-snr` | `8.0` | per-channel dB, from the audio frame headers. Was `40.0` before audio protocol version 4; do not convert an old value, re-tune from this one |
 | `SILENCE_TIMEOUT` | `--silence-timeout` | `10.0` |  |
 | `SILENCE_MIN_WORDS` | `--silence-min-words` | `4` | fallback when the server sends no signal data |
 
@@ -801,8 +819,18 @@ Whisper attach are **never** torn down between frequencies — only at shutdown.
 
 The extension tap is fed in the RTP receive path (`audio.go:286`), upstream of
 the mute check in `streamAudio` (`websocket.go:1618`). So Whisper still receives
-full-rate audio server-side while this client receives no audio bytes at all —
-no Opus, no zstd, no decoding.
+full-rate audio server-side while this client receives no audible PCM at all.
+
+The audio *body* is never decoded — no Opus, no predictive codec. Each binary
+frame's **header** is parsed, though, because that is where the live
+signal-quality pair that drives `--silence-min-snr` travels. Since audio
+protocol version 4 those bytes are plaintext at the front of the frame, so the
+whole cost is a varint or two; under versions 1–3 the frame was zstd-wrapped and
+this client had to decompress every packet to read four bytes out of the header,
+which is why `zstandard` used to be a dependency and no longer is.
+
+Because a muted session's PCM is all zeros, its packets carry version 4's
+*silent* flag and have no body at all — the header is the entire frame.
 
 ### How the audio preview works
 
@@ -854,17 +882,87 @@ control message, not a teardown.
 
 ### The two SNR thresholds
 
-`--min-snr` (8) and `--silence-min-snr` (40) both read "SNR in dB" but are
-**different measurements on different scales**, which is why the defaults look
-so far apart:
+`--min-snr` (20) and `--silence-min-snr` (8) are **different measurements from
+different sources**, though since audio protocol version 4 they are at least on
+the same scale:
 
 | | Source | Scale |
 |---|---|---|
 | `--min-snr` | the server's voice activity feed | Per-channel SNR: the detected region's average power minus the median noise floor (`voice_activity.go`). |
-| `--silence-min-snr` | the audio frame headers, measured here | `basebandPower − noiseDensity` — power vs noise **density**, the server's own `min_snr` definition. Runs about 34.8 dB higher for the same signal (10·log10 of a 3 kHz channel). |
+| `--silence-min-snr` | the audio frame headers, measured here | `basebandPower − noisePower`, both dBFS over the demodulator passband, so also a per-channel SNR. |
 
-So 40 on the silence scale is roughly 5 dB of channel SNR. The two numbers look
-wildly different only because the scales are.
+#### Why `--silence-min-snr` went from 40 to 8
+
+**Two separate corrections landed at the same time, so the old number cannot be
+converted arithmetically — it has to be re-measured.**
+
+1. **Units.** Up to protocol version 2 the header's second figure was noise
+   *density* (N₀, dBFS/Hz). From version 3 on the server sends passband noise
+   *power* (`channelNoisePower` in `radiod_status.go`), which is 10·log10 of the
+   filter width lower — 33.7 dB on this client's 50–2400 Hz passband. Upstream
+   made this change because the density scale moved with the filter width, so a
+   threshold tuned on SSB gated wrongly on CW.
+2. **Clamping.** The server's noise readings used to bottom out around −30. Any
+   threshold fitted while that clamp was in place was fitted to *clamped* data:
+   with noise held artificially high, `baseband − noise` read artificially low
+   and was squeezed into a narrower range than the real one. With the clamp gone
+   the noise goes lower, so SNR reads higher and spreads wider. This pushes the
+   opposite way to correction 1.
+
+**The statistic the gate uses is the 10-second window PEAK, not a median.**
+`--silence-timeout` defaults to 10 s, and at that deadline the scanner compares
+the highest SNR seen since the dwell began — `peak_snr < args.silence_min_snr`
+in `scanner.py`, against a `_peak_snr` reset once per dwell. A per-frame median
+of an active frequency runs far lower than its window peak, because speech is
+peaky and a QSO is half pauses, so the two numbers are not interchangeable and a
+threshold set against a median would be far too low.
+
+So `8.0` is measured, not derived. Captured 2026-09-03 against
+`m9psy.tunnel.ubersdr.org` through this addon's own `UberSDRSession` — same
+50–2400 Hz passband, same AGC overrides, same muting, same v4 header decode — on
+twenty 20/40/15/60 m phone captures of 40–60 s, yielding 123 ten-second windows.
+Active frequencies were taken from the server's own voice-activity feed at
+capture time, weakest detections included on purpose, and every capture was
+checked afterwards for the speech/pause structure that distinguishes a station
+transmitting from a frequency that merely used to be busy.
+
+| Window population | n | median | p90 | p95 | range |
+|---|---|---|---|---|---|
+| Speech on an occupied frequency | 38 | 15.5 | — | — | 9.0 … 27.2 dB |
+| Idle, and pauses mid-QSO | 85 | 1.3 | 4.4 | 5.4 | −2.0 … 12.5 dB |
+
+Sweeping the threshold over those 123 windows:
+
+| Threshold | Speech windows kept | Idle windows that would keep a dead dwell alive |
+|---|---|---|
+| 5 | 38/38 (100%) | 7/85 (8.2%) |
+| 6 | 38/38 (100%) | 2/85 (2.4%) |
+| **7–9** | **38/38 (100%)** | **1/85 (1.2%)** |
+| 10+ | 35/38 (92%) | 1/85 (1.2%) |
+
+There is a plateau from 7 to 9 where nothing is lost on either side; `8.0` is its
+midpoint, 1.0 dB below the weakest speech window and 2.6 dB above idle p95. The
+single idle window no threshold rejects is 7.108 MHz, where a station transmitted
+briefly during an otherwise dead capture — a real signal, not noise.
+
+Weak signals are not the problem they look like: the weakest QSO the activity
+feed could offer (21.218 MHz, feed SNR 14.4) still peaked 13.8–15.6 dB in every
+window. Nothing between 6 and 9 dB turned out to be a station worth dwelling on.
+
+The observed noise floor was −112 to −115 dBFS, which is what confirms the −30
+clamp is gone. The interim post-migration default of `6.0` was arithmetic
+(40 − 33.7) rather than measured, and sits inside the idle tail — it would have
+held a dead dwell open on the 6.8 dB excursion above.
+
+Raise toward 9 to skip marginal signals, lower toward 7 to keep them. Below
+about 6 the scanner starts dwelling on noise; above about 9 it starts skipping
+real QSOs.
+
+*Caveat on what this does not cover:* one receiver, one afternoon, mostly
+daytime 20 m and 40 m phone. The idle side is well sampled (85 windows across 16
+captures); the speech side is 38 windows from nine stations. A much quieter or
+noisier site will sit differently, and the honest check is to run a scan and
+watch the `peak SNR … dB < …` lines the scanner logs each time it moves on.
 
 The feed in practice reports only signals well clear of the noise, so its values
 run far above the 6–10 dB its detector nominally looks for. Sampled live across
@@ -872,9 +970,10 @@ three bands: 16 signals, 20.3 dB lowest, 25.7 median, 32.2 highest — which is
 why the default is 20 and not something lower. At 8 the threshold discarded
 nothing at all.
 
-**Do not copy 40 into `--min-snr`.** It would demand a 40 dB per-channel SNR
-from the activity feed, nothing would clear it, and the scanner would sit with
-nothing to scan.
+The two defaults are still not interchangeable — 6 dB off the activity feed
+would let almost everything through, and 20 dB of measured channel SNR is far
+above what a readable SSB signal needs — but they no longer differ by a scale
+factor, only by what they are filtering.
 
 ### Revisits
 

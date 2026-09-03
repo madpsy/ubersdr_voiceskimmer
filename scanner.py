@@ -1836,21 +1836,34 @@ def parse_args(argv=None):
                            "transcription on the WhisperLive server. "
                            "With --lock-freq, only worker 0 stays pinned to "
                            "that frequency — the rest scan normally.")
-    scan.add_argument("--silence-min-snr", type=float, default=40.0,
+    scan.add_argument("--silence-min-snr", type=float, default=8.0,
                       help="Peak SNR (dB) that must be seen within "
                            "--silence-timeout for a frequency to count as "
                            "active. Measured directly from the audio frame "
                            "headers, so it does not depend on Whisper "
                            "producing anything. Any single peak above this "
-                           "keeps the dwell alive. This is power vs noise "
-                           "DENSITY (the server's own min_snr definition), not "
-                           "per-channel SNR, and so NOT the same scale as "
-                           "--min-snr — subtract ~34.8 dB for a 3 kHz "
-                           "SSB channel. Measured live: a quiet frequency "
-                           "sits around 33-34 dB and peaks below 38; an "
-                           "active one peaks past 40. Used in preference to "
+                           "keeps the dwell alive. Used in preference to "
                            "--silence-min-words whenever the server reports "
-                           "signal data.")
+                           "signal data. RE-DERIVED FROM MEASUREMENT at the "
+                           "audio protocol version 4 migration — two separate "
+                           "things changed at once, so the old default of 40 "
+                           "cannot be converted arithmetically. (1) The "
+                           "header's second figure was noise DENSITY up to "
+                           "protocol version 2 and is passband noise POWER from "
+                           "version 3 on, about 33.7 dB lower on this client's "
+                           "2350 Hz passband. (2) The server's noise readings no "
+                           "longer bottom out around -30, so the old figures "
+                           "were fitted to clamped data and were compressed into "
+                           "a narrower range than the real ones. 8.0 was "
+                           "measured on m9psy 2026-09-03: 123 ten-second window "
+                           "PEAKS (the statistic this gate actually compares, "
+                           "not a per-frame median) across 20 phone captures. "
+                           "Speech windows ran 9.0-27.2 dB (median 15.5), idle "
+                           "and in-QSO pauses -2.0 to 5.4 at p95. Every "
+                           "threshold from 7 to 9 keeps every speech window "
+                           "there was; 8.0 is the midpoint. Re-measure before "
+                           "changing it. See README section 'The two SNR "
+                           "thresholds'.")
     scan.add_argument("--silence-min-words", type=int, default=4,
                       help="Words (from completed segments) required within "
                            "--silence-timeout to count as real activity. "
@@ -1862,8 +1875,9 @@ def parse_args(argv=None):
     scan.add_argument("--revisit-cooldown", type=float, default=120.0,
                       help="Seconds before a frequency may be revisited. "
                            "Ignored when every target is in cooldown.")
-    # NB: a per-channel SNR, unlike --silence-min-snr, which is power vs noise
-    # density and runs ~34.8 dB higher for the same signal. See that flag.
+    # NB: from a different source to --silence-min-snr (the activity feed rather
+    # than the audio frame headers), but since protocol version 4 the two are at
+    # least on the same scale — both are per-channel SNR in dB. See that flag.
     scan.add_argument("--min-snr", type=float, default=20.0,
                       help="Ignore activity below this SNR")
     scan.add_argument("--min-confidence", type=float, default=0.7,
