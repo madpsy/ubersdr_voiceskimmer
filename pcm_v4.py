@@ -36,6 +36,14 @@ decoded so far and its header state carries whatever the encoder chose not to
 repeat, so create one per connection and drop it when the socket closes. A
 packet that never reaches the decoder desynchronises it from the server, which
 is why every frame must be decoded even when the result is then discarded.
+
+VENDORING
+---------
+Vendored from the server repository's clients/python/pcm_v4.py, with ONE
+addition that upstream copy does not yet carry: payload profile 2, the
+reduced-depth I/Q the min_margin query parameter asks for. A re-vendor must
+carry it forward -- see PROFILE_IQ_SCALED and the shift byte in decode_packet.
+Everything else must stay byte-identical to upstream.
 """
 
 from __future__ import annotations
@@ -352,11 +360,30 @@ class _OpusHeaderDecoder:
 _TAP_SHIFT = 16
 _TAP_ROUND = 1 << (_TAP_SHIFT - 1)
 
-#: Bounds |tap| to 2**24, a real magnitude of 256. Normal adaptation settles
-#: around 2**16, so the clamp is insurance that never fires in practice -- but
-#: it must be applied identically on both sides, since if it ever does fire the
-#: two must agree.
+#: Bounds |tap| to 2**24, a real magnitude of 256. With the leak below holding
+#: the taps near their equilibrium the clamp is insurance that never fires in
+#: practice -- but it must be applied identically on both sides, since if it
+#: ever does fire the two must agree.
 _TAP_LIMIT = 1 << 24
+
+#: Leakage of the tap update: every adaptation subtracts w/2**shift from a tap
+#: before adding the gradient step.
+#:
+#: Without it the taps have no restoring force and walk freely in any direction
+#: the input does not excite, which on a band whose energy sits in a few
+#: carriers is most of them. On a 909 kHz iq384 stream the server's taps walked
+#: until the coded stream was larger than the samples going into it. The two
+#: values differ because the complex filter and the real cascade are different
+#: filters on different signals; pcm_predictive.go on the server carries the
+#: measurements behind both.
+#:
+#: The arithmetic has to match the server's exactly or the two ends part company
+#: within a packet, and the trap here is Python's >>: like C's, it floors, so a
+#: tap of -1 would leak -1 rather than 0 and every negative tap would be dragged
+#: upwards. Every site below truncates the MAGNITUDE instead, which is what the
+#: server does, and which leaves a tap smaller than 2**shift leaking nothing.
+_LEAK_SHIFT_COMPLEX = 14
+_LEAK_SHIFT_REAL = 16
 
 #: Marks a body carrying verbatim samples, in the byte Decode is handed.
 _PAYLOAD_ESCAPE = 1 << 7
@@ -369,15 +396,32 @@ PROFILE_IQ = 0
 #: A four-stage real cascade, orders 8/8/4/2, for demodulated audio. Depth
 #: matters far more than filter length there.
 PROFILE_AUDIO = 1
+#: The same complex filter as PROFILE_IQ over samples the server requantised by
+#: a power of two before coding them -- the reduced-depth I/Q a client asks for
+#: with min_margin. The predictor is identical to profile 0; the whole difference
+#: is on the wire, where a non-silent body carries the shift in one leading byte
+#: which is undone only on the way out. It is a separate profile id rather than a
+#: flag so that a client which never asked for the mode fails loudly instead of
+#: reading scaled samples as if they were full depth.
+PROFILE_IQ_SCALED = 2
 
 #: The registry the wire format refers to; it must match the server's table
 #: entry for entry. (complex, orders, mus)
 _PROFILES = {
     PROFILE_IQ: (True, (16,), (16,)),
     PROFILE_AUDIO: (False, (8, 8, 4, 2), (16, 16, 32, 32)),
+    PROFILE_IQ_SCALED: (True, (16,), (16,)),
 }
 
-_PROFILE_NAMES = {PROFILE_IQ: 'iq-complex-o16', PROFILE_AUDIO: 'audio-real-8/8/4/2'}
+_PROFILE_NAMES = {
+    PROFILE_IQ: 'iq-complex-o16',
+    PROFILE_AUDIO: 'audio-real-8/8/4/2',
+    PROFILE_IQ_SCALED: 'iq-complex-o16-scaled',
+}
+
+#: The deepest requantisation the server will apply, and so the largest shift a
+#: profile 2 body may declare.
+_MAX_LOSSY_SHIFT = 15
 
 
 def _round_shift(v: int) -> int:
@@ -496,6 +540,7 @@ class _ComplexStage:
             mi = self.mu * ((ei > 0) - (ei < 0))
             sr = self.sr
             si = self.si
+            sh = _LEAK_SHIFT_COMPLEX
             if self.fast:
                 for j in range(order):
                     k = lo + j
@@ -504,15 +549,19 @@ class _ComplexStage:
                     # requires; here that is the negated sign of the imaginary
                     # part.
                     his = -si[k]
-                    wr[j] += mr * hrs - mi * his
-                    wi[j] += mr * his + mi * hrs
+                    u = wr[j]
+                    v = wi[j]
+                    wr[j] = u + mr * hrs - mi * his - (u >> sh if u >= 0 else -(-u >> sh))
+                    wi[j] = v + mr * his + mi * hrs - (v >> sh if v >= 0 else -(-v >> sh))
             else:
                 for j in range(order):
                     k = lo + j
                     hrs = sr[k]
                     his = -si[k]
-                    a = wr[j] + mr * hrs - mi * his
-                    b = wi[j] + mr * his + mi * hrs
+                    u = wr[j]
+                    v = wi[j]
+                    a = u + mr * hrs - mi * his - (u >> sh if u >= 0 else -(-u >> sh))
+                    b = v + mr * his + mi * hrs - (v >> sh if v >= 0 else -(-v >> sh))
                     wr[j] = _TAP_LIMIT if a > _TAP_LIMIT else (-_TAP_LIMIT if a < -_TAP_LIMIT else a)
                     wi[j] = _TAP_LIMIT if b > _TAP_LIMIT else (-_TAP_LIMIT if b < -_TAP_LIMIT else b)
 
@@ -565,20 +614,25 @@ class _ComplexStage:
             mi = self.mu * ((ei > 0) - (ei < 0))
             sr = self.sr
             si = self.si
+            sh = _LEAK_SHIFT_COMPLEX
             if self.fast:
                 for j in range(order):
                     k = lo + j
                     hrs = sr[k]
                     his = -si[k]
-                    wr[j] += mr * hrs - mi * his
-                    wi[j] += mr * his + mi * hrs
+                    u = wr[j]
+                    v = wi[j]
+                    wr[j] = u + mr * hrs - mi * his - (u >> sh if u >= 0 else -(-u >> sh))
+                    wi[j] = v + mr * his + mi * hrs - (v >> sh if v >= 0 else -(-v >> sh))
             else:
                 for j in range(order):
                     k = lo + j
                     hrs = sr[k]
                     his = -si[k]
-                    a = wr[j] + mr * hrs - mi * his
-                    b = wi[j] + mr * his + mi * hrs
+                    u = wr[j]
+                    v = wi[j]
+                    a = u + mr * hrs - mi * his - (u >> sh if u >= 0 else -(-u >> sh))
+                    b = v + mr * his + mi * hrs - (v >> sh if v >= 0 else -(-v >> sh))
                     wr[j] = _TAP_LIMIT if a > _TAP_LIMIT else (-_TAP_LIMIT if a < -_TAP_LIMIT else a)
                     wi[j] = _TAP_LIMIT if b > _TAP_LIMIT else (-_TAP_LIMIT if b < -_TAP_LIMIT else b)
 
@@ -644,12 +698,15 @@ class _RealStage:
         if e:
             m = self.mu * ((e > 0) - (e < 0))
             s = self.s
+            sh = _LEAK_SHIFT_REAL
             if self.fast:
                 for j in range(order):
-                    w[j] += m * s[lo + j]
+                    u = w[j]
+                    w[j] = u + m * s[lo + j] - (u >> sh if u >= 0 else -(-u >> sh))
             else:
                 for j in range(order):
-                    a = w[j] + m * s[lo + j]
+                    u = w[j]
+                    a = u + m * s[lo + j] - (u >> sh if u >= 0 else -(-u >> sh))
                     w[j] = _TAP_LIMIT if a > _TAP_LIMIT else (-_TAP_LIMIT if a < -_TAP_LIMIT else a)
 
         h[idx] = x
@@ -890,12 +947,31 @@ class PCMv4Decoder:
             self._codec = PredictiveCodec(h.profile)
 
         if h.silent:
+            # A silent packet ends at the header on every profile: no body, and
+            # so no shift byte either -- the shift would describe nothing.
             if len(pkt) != off:
                 raise PCMv4Error('pcm v4: silent packet carries %d bytes of body' % (len(pkt) - off))
             self._codec.advance_silence(h.sample_count)
             return h, [0] * h.sample_count
 
-        return h, self._codec.decode_body(pkt[off:], h.sample_count, h.escape)
+        shift = 0
+        if h.profile == PROFILE_IQ_SCALED:
+            if len(pkt) <= off:
+                raise PCMv4Error('pcm v4: scaled packet carries no shift')
+            shift = pkt[off]
+            if shift > _MAX_LOSSY_SHIFT:
+                raise PCMv4Error('pcm v4: shift %d out of range' % shift)
+            off += 1
+
+        samples = self._codec.decode_body(pkt[off:], h.sample_count, h.escape)
+        if shift:
+            # Undone only here, on the way out. Both ends ran the predictor over
+            # the quantised values, so scaling any earlier would put them out of
+            # step. Saturating, as the server's lossyRestore does.
+            for i, v in enumerate(samples):
+                r = v << shift
+                samples[i] = 32767 if r > 32767 else (-32768 if r < -32768 else r)
+        return h, samples
 
     def decode_packet_le(self, pkt: bytes) -> Tuple[bytes, PCMv4Header]:
         """decode_packet in the shape the rest of the client works in:

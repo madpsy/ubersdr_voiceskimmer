@@ -13,7 +13,7 @@ THE VERSION IN THE URL
     number here produces frames of the wrong shape and no error to say so.
 
 THE DECODER ITSELF
-    pcm_v4.py is vendored verbatim from the server repository
+    pcm_v4.py is vendored from the server repository
     (clients/python/pcm_v4.py), and the version 4 predictor is BACKWARD
     adaptive: the two ends derive their filter taps from samples already coded
     and never exchange a coefficient. Any arithmetic difference from the server
@@ -50,18 +50,25 @@ from pcm_v4 import (
 # Identical to the constant in the server repository's
 # clients/python/test_pcm_v4.py, its Go port and its C++ port; that agreement is
 # what makes this a conformance test rather than a regression test.
-EXPECTED_SHA = "ba368c898ae406c5acc806653d9f2dbbfa40086eca3707fda5d77c13948f78d1"
+EXPECTED_SHA = "4875d2185f1ff5a2031386c569cac0c2259e6a827b9e61f813399a19c3b9c903"
+
+# The second fixture: reduced-depth I/Q at a 20 dB margin, crossing between
+# profile 2 and profile 0 mid-stream. This addon never asks for that mode — it
+# takes demodulated audio — but the vendored decoder implements the profile, and
+# an implementation nothing exercises is an implementation nothing checks.
+EXPECTED_SCALED_SHA = "7315366ceed3e70552c28d31cde690a14dc66f5244b5a8dc34a5e696f5698ccc"
 
 FIXTURE = Path(__file__).with_name("testdata") / "pcmv4_stream.bin"
+SCALED_FIXTURE = Path(__file__).with_name("testdata") / "pcmv4_scaled.bin"
 
 
-def read_fixture():
-    """Packets from the fixture.
+def read_fixture(path=None):
+    """Packets from a fixture.
 
     Layout: "UV4F", a format byte, a uint32 packet count, then each packet as a
     uint32 length and that many bytes.
     """
-    raw = FIXTURE.read_bytes()
+    raw = (path or FIXTURE).read_bytes()
     if len(raw) < 9 or raw[:4] != b"UV4F":
         raise AssertionError("fixture: bad header")
     count = struct.unpack_from("<I", raw, 5)[0]
@@ -185,13 +192,12 @@ class TestSignalFromHeaders(unittest.TestCase):
         self.assertGreater(len(seen), len(packets) // 2)
 
         # And the values themselves are the decoded centidecibel pairs, not
-        # whatever four bytes happened to sit at a fixed offset.
-        for power, noise in seen:
-            self.assertGreater(power, -400.0)
-            self.assertLess(power, 400.0)
-            self.assertGreater(noise, -400.0)
-            self.assertLess(noise, 400.0)
-        self.assertGreater(len(set(seen)), 1, "the pair never changed")
+        # whatever four bytes happened to sit at a fixed offset. The fixture
+        # encodes one pair, -12.5 and -70.25 dB, on every packet that carries a
+        # reading; reading them as anything but signed centidecibels lands
+        # somewhere else entirely.
+        self.assertEqual(set(seen), {(-12.5, -70.25)},
+                         "the pair is not the one the server encoded")
 
     def test_no_reading_is_reported_as_no_reading(self):
         """radiod having nothing to say arrives as the QUALITY_NO_READING
@@ -314,7 +320,7 @@ class TestVendoredDecoderConformance(unittest.TestCase):
         # Every distinct (rate, channels) the fixture passes through, in order.
         # A decoder that lost the carried-forward metadata could still hash
         # correctly while mislabelling the stream.
-        want_params = [(12000, 1), (24000, 1), (48000, 2)]
+        want_params = [(12000, 1), (24000, 1), (384000, 2)]
         got_params = []
 
         for i, pkt in enumerate(packets):
@@ -351,6 +357,22 @@ class TestVendoredDecoderConformance(unittest.TestCase):
         self.assertGreater(silent, 0, "the fixture carried no silent packets")
         self.assertGreater(escape, 0, "the fixture carried no escape packets")
 
+    def test_decodes_reduced_depth_iq_bit_exactly(self):
+        """Profile 2: the same predictor as profile 0 over requantised samples,
+        with the scale in one byte ahead of the body and undone only on the way
+        out. The fixture crosses back to profile 0 mid-stream, so it also covers
+        rebuilding the codec when the declared profile changes."""
+        dec = PCMv4Decoder()
+        digest = hashlib.sha256()
+        profiles = set()
+        for pkt in read_fixture(SCALED_FIXTURE):
+            pcm_le, header = dec.decode_packet_le(pkt)
+            profiles.add(header.profile)
+            digest.update(pcm_le)
+        self.assertEqual(digest.hexdigest(), EXPECTED_SCALED_SHA,
+                         "decoded samples differ from what the server encoded")
+        self.assertEqual(profiles, {pcm_v4.PROFILE_IQ, pcm_v4.PROFILE_IQ_SCALED})
+
     def test_timestamps_advance_monotonically(self):
         """A full timestamp at each resynchronisation point, a signed varint
         delta in between. Losing the carry-forward would still return samples,
@@ -381,10 +403,15 @@ class TestVendoredDecoderConformance(unittest.TestCase):
             self.assertFalse(is_zstd_frame(short))
 
     def test_the_vendored_file_is_unmodified_upstream(self):
-        """pcm_v4.py is vendored verbatim on purpose. The predictor is backward
-        adaptive, so an arithmetic 'improvement' returns plausible noise rather
-        than an error — the header decoder this addon actually uses is a private
-        name in it, and reaching for that is the only liberty taken."""
+        """pcm_v4.py is vendored on purpose. The predictor is backward adaptive,
+        so an arithmetic 'improvement' returns plausible noise rather than an
+        error — the header decoder this addon actually uses is a private name in
+        it, and reaching for that is the only liberty taken. The one addition to
+        upstream is profile 2, which the reference Python client does not yet
+        carry; the two fixture hashes above are what say it was added correctly.
+        """
+        self.assertTrue(hasattr(pcm_v4, "PROFILE_IQ_SCALED"),
+                        "profile 2 was dropped by a re-vendor from upstream")
         self.assertTrue(hasattr(pcm_v4, "_HeaderDecoder"),
                         "the header decoder ubersdr.py uses has been renamed")
         for gone in ("choose_protocol_version", "DEFAULT_PROTOCOL_VERSION",

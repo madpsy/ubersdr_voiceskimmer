@@ -599,12 +599,16 @@ behind the addon proxy.
 `test_ubersdr.py` covers the audio protocol: that the WebSocket asks for version
 4, and that the vendored `pcm_v4.py` decodes `testdata/pcmv4_stream.bin` — a
 stream the server's own encoder produced — to exactly the samples that went into
-it. That fixture earns its 90 kB: the version 4 predictor is backward adaptive,
+it. That fixture earns its 180 kB: the version 4 predictor is backward adaptive,
 so the two ends derive their filter taps independently and never exchange a
 coefficient. Any arithmetic difference from the server returns plausible noise
 rather than an error, and nothing short of comparing samples would catch it.
-`pcm_v4.py` is vendored verbatim from `clients/python/pcm_v4.py` in the
-ka9q_ubersdr repository for the same reason — re-copy it, do not edit it.
+`testdata/pcmv4_scaled.bin` does the same for the reduced-depth I/Q profile,
+which this addon never asks for but its decoder implements.
+`pcm_v4.py` is vendored from `clients/python/pcm_v4.py` in the ka9q_ubersdr
+repository for the same reason — re-copy it, do not edit it. The one exception
+is payload profile 2, which that upstream copy does not yet carry: a re-vendor
+has to put it back, and the scaled fixture is what says whether it did.
 
 `test_spectrum_v2.js` builds spectrum frames from the server's definition
 (`user_spectrum_v2.go`, cross-checked against its own `spectrumV2EncodeRef`
