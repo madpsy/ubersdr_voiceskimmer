@@ -755,6 +755,14 @@
     width: 100%;
     background: #0d1117;
   }
+  /* OSM serves one set of tiles and they are a light map, so this filter is
+     what makes them sit in a dark interface rather than a second tile source
+     being fetched. The same declaration every other UberSDR map uses — a
+     recipe rather than a calculation. Scoped to the tiles so the markers and
+     popups drawn over them keep their own colours. */
+  #map .leaflet-tile {
+    filter: brightness(0.7) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) brightness(0.7);
+  }
   /* Leaflet ships light-themed chrome; these bring its controls, popups and
      attribution into the dashboard's palette rather than leaving a white
      block sitting in a dark page. */

@@ -142,8 +142,8 @@ turning off *Confirmed* answers "what did I actually submit". One marker per
 callsign however many bands it was heard on; hover it for the bands,
 frequencies and whether each was spotted. Stations QRZ has no coordinates for
 are counted under the map rather than silently dropped. Map tiles are fetched
-from CARTO, so the map is blank without internet access — nothing else on the
-dashboard depends on it.
+from OpenStreetMap, so the map is blank without internet access — nothing else
+on the dashboard depends on it.
 
 Stop with Ctrl-C; it drains the transcription pipeline and prints a summary.
 

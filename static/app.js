@@ -657,15 +657,15 @@
       zoomControl: true,
     }).setView([20, 0], 1);
 
-    L.tileLayer(
-      "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-      {
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' +
-          ' &copy; <a href="https://carto.com/attributions">CARTO</a>',
-        maxZoom: 18,
-      }
-    ).addTo(map);
+    // OSM's standard tiles, darkened by the CSS filter on #map rather than
+    // fetched from a dark tile source: CARTO's basemaps now want an API key,
+    // and the filter is what every other UberSDR map already uses.
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' +
+        " contributors",
+      maxZoom: 19,
+    }).addTo(map);
 
     layerConfirmed = L.layerGroup().addTo(map);
     layerSpotted = L.layerGroup().addTo(map);
